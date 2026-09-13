@@ -2,6 +2,8 @@
 
 Syft turns a failed pytest test into a structured, versioned `TestAnalysis`. Classification is entirely deterministic: an LLM never decides whether a failure is `FLAKY`, `REGRESSION`, or `ESCALATE`.
 
+Judge-facing material: [system and reliability brief](docs/system-reliability-brief.md), [two-minute demo script](docs/demo-script.md), and [submission checklist](docs/submission-checklist.md).
+
 ## What is included
 
 - GitHub Actions failed/last-green run discovery and safe JUnit artifact download
