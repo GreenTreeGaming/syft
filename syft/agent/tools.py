@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -55,6 +56,7 @@ _SECRET_ASSIGNMENT = re.compile(
     r"\s*[=:]\s*\S+"
 )
 _BEARER = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-+=/]+")
+_URL_CREDENTIALS = re.compile(r"(?i)(https?://)[^/\s:@]+:[^@\s/]+@")
 _INSTALL = re.compile(
     r"(?im)^\s*(?:-\s+)?(?:run:\s*[>|]?\s*)?(pip(?:3)? install|poetry install|uv sync|uv pip install|"
     r"pip-sync|pipenv install).+$"
@@ -205,15 +207,17 @@ def execute_tool(
     repo_path: Path | None,
     history_store: HistoryStore | None,
     repository: str | None,
+    timeout_seconds: float | None = None,
 ) -> str:
+    git_timeout = _git_timeout(timeout_seconds)
     if name == "search_history":
         return _search_history(analysis, history_store, repository)
     if name == "get_rerun_output":
         return _get_rerun_output(analysis, arguments)
     if name == "inspect_ci_environment":
-        return _inspect_ci_environment(analysis, repo_path, repository)
+        return _inspect_ci_environment(analysis, repo_path, repository, timeout_seconds)
     if name == "search_code":
-        return _search_code(analysis, repo_path, arguments)
+        return _search_code(analysis, repo_path, arguments, git_timeout)
     if name not in {"read_file", "read_previous_file", "git_diff", "git_blame", "git_log"}:
         return f"Unknown tool: {name}"
     path = _allowed_path(arguments.get("path"), analysis)
@@ -224,18 +228,22 @@ def execute_tool(
     current = analysis.commit_evidence.current_commit
     previous = analysis.commit_evidence.last_green_commit
     if name == "read_file":
-        return _read_file(repo_path, current, path, arguments)
+        return _read_file(repo_path, current, path, arguments, git_timeout)
     if name == "read_previous_file":
         if not previous:
             return "last-green commit not configured"
-        return _read_file(repo_path, previous, path, arguments)
+        return _read_file(repo_path, previous, path, arguments, git_timeout)
     if name == "git_diff":
         if not previous:
             return "last-green commit not configured"
-        return _git(repo_path, ["diff", "--no-color", "-U3", previous, current, "--", path])
+        return _git(
+            repo_path,
+            ["diff", "--no-color", "-U3", previous, current, "--", path],
+            timeout_seconds=git_timeout,
+        )
     if name == "git_blame":
-        return _git_blame(repo_path, current, path, arguments)
-    return _git_log(repo_path, current, path, arguments)
+        return _git_blame(repo_path, current, path, arguments, git_timeout)
+    return _git_log(repo_path, current, path, arguments, git_timeout)
 
 
 def _allowed_path(raw: object, analysis: TestAnalysis) -> str | None:
@@ -250,8 +258,14 @@ def _allowed_path(raw: object, analysis: TestAnalysis) -> str | None:
     return posix
 
 
-def _read_file(repo_path: Path, commit: str, path: str, arguments: dict[str, Any]) -> str:
-    output = _git(repo_path, ["show", f"{commit}:{path}"])
+def _read_file(
+    repo_path: Path,
+    commit: str,
+    path: str,
+    arguments: dict[str, Any],
+    timeout_seconds: float,
+) -> str:
+    output = _git(repo_path, ["show", f"{commit}:{path}"], timeout_seconds=timeout_seconds)
     if output.startswith("git failed:"):
         return output
     start = arguments.get("start_line")
@@ -270,25 +284,50 @@ def _read_file(repo_path: Path, commit: str, path: str, arguments: dict[str, Any
     return _truncate("".join(lines[begin:stop]))
 
 
-def _git_blame(repo_path: Path, commit: str, path: str, arguments: dict[str, Any]) -> str:
+def _git_blame(
+    repo_path: Path,
+    commit: str,
+    path: str,
+    arguments: dict[str, Any],
+    timeout_seconds: float,
+) -> str:
     start = arguments.get("start_line")
     end = arguments.get("end_line")
     if not isinstance(start, int) or not isinstance(end, int):
         return "start_line and end_line must be integers"
     if start < 1 or end < start:
         return "Invalid line range"
-    return _git(repo_path, ["blame", "-L", f"{start},{end}", commit, "--", path])
+    return _git(
+        repo_path,
+        ["blame", "-L", f"{start},{end}", commit, "--", path],
+        timeout_seconds=timeout_seconds,
+    )
 
 
-def _git_log(repo_path: Path, commit: str, path: str, arguments: dict[str, Any]) -> str:
+def _git_log(
+    repo_path: Path,
+    commit: str,
+    path: str,
+    arguments: dict[str, Any],
+    timeout_seconds: float,
+) -> str:
     limit = arguments.get("limit", 5)
     if not isinstance(limit, int) or limit < 1:
         return "limit must be a positive integer"
     limit = min(limit, 10)
-    return _git(repo_path, ["log", "-n", str(limit), "--oneline", commit, "--", path])
+    return _git(
+        repo_path,
+        ["log", "-n", str(limit), "--oneline", commit, "--", path],
+        timeout_seconds=timeout_seconds,
+    )
 
 
-def _search_code(analysis: TestAnalysis, repo_path: Path | None, arguments: dict[str, Any]) -> str:
+def _search_code(
+    analysis: TestAnalysis,
+    repo_path: Path | None,
+    arguments: dict[str, Any],
+    timeout_seconds: float,
+) -> str:
     query = arguments.get("query")
     if not isinstance(query, str):
         return "query must be a string"
@@ -303,6 +342,7 @@ def _search_code(analysis: TestAnalysis, repo_path: Path | None, arguments: dict
     completed = _run_git(
         repo_path,
         ["grep", "-n", "-F", "-I", "-e", query, commit, "--", *_SEARCH_PATHSPECS],
+        timeout_seconds=timeout_seconds,
     )
     if completed.returncode == 1 and not (completed.stderr or "").strip():
         return "No matches."
@@ -312,7 +352,7 @@ def _search_code(analysis: TestAnalysis, repo_path: Path | None, arguments: dict
     lines = [line for line in completed.stdout.splitlines() if line.strip()][:SEARCH_RESULT_LIMIT]
     if not lines:
         return "No matches."
-    return _truncate("\n".join(lines) + "\n")
+    return _truncate(_sanitize("\n".join(lines) + "\n"))
 
 
 def _get_rerun_output(analysis: TestAnalysis, arguments: dict[str, Any]) -> str:
@@ -338,6 +378,7 @@ def _inspect_ci_environment(
     analysis: TestAnalysis,
     repo_path: Path | None,
     repository: str | None,
+    timeout_seconds: float | None,
 ) -> str:
     context = analysis.ci_context
     payload: dict[str, Any] = {
@@ -352,12 +393,17 @@ def _inspect_ci_environment(
         "environment_variable_names": [],
         "dependency_install_commands": [],
         "workflow_files": [],
-        "workflow_excerpts": {},
     }
     if repo_path is None:
         return _truncate(json.dumps(payload))
+    budget = float(GIT_TIMEOUT_SECONDS) if timeout_seconds is None else max(0.001, timeout_seconds)
+    deadline = time.monotonic() + budget
     commit = analysis.commit_evidence.current_commit
-    listing = _run_git(repo_path, ["ls-tree", "-r", "--name-only", commit, "--", ".github/workflows"])
+    listing = _run_git(
+        repo_path,
+        ["ls-tree", "-r", "--name-only", commit, "--", ".github/workflows"],
+        timeout_seconds=_remaining_timeout(deadline),
+    )
     if listing.returncode != 0:
         detail = (listing.stderr or listing.stdout or "unknown error").strip()
         return f"git failed: {detail[:500]}"
@@ -371,24 +417,22 @@ def _inspect_ci_environment(
     python_version: list[str] = []
     env_names: list[str] = []
     installs: list[str] = []
-    excerpts: dict[str, str] = {}
     for path in files:
-        shown = _git(repo_path, ["show", f"{commit}:{path}"])
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        shown = _git(repo_path, ["show", f"{commit}:{path}"], timeout_seconds=remaining)
         if shown.startswith("git failed:"):
-            excerpts[path] = shown
             continue
-        sanitized = _sanitize(shown)
-        excerpts[path] = _truncate(sanitized)[:2000]
         runner_os.extend(_RUNS_ON.findall(shown))
         python_version.extend(_PYTHON_VERSION.findall(shown))
         env_names.extend(_env_names(shown))
         for match in _INSTALL.finditer(shown):
-            installs.append(match.group(0).strip())
+            installs.append(_sanitize(match.group(0).strip()))
     payload["runner_os"] = _unique(runner_os)
     payload["python_version"] = _unique(python_version)
     payload["environment_variable_names"] = _unique(env_names)
     payload["dependency_install_commands"] = _unique(installs)
-    payload["workflow_excerpts"] = excerpts
     return _truncate(json.dumps(payload))
 
 
@@ -449,15 +493,20 @@ def _search_history(
     return _truncate(json.dumps(payload))
 
 
-def _git(repo_path: Path, args: list[str]) -> str:
-    completed = _run_git(repo_path, args)
+def _git(repo_path: Path, args: list[str], *, timeout_seconds: float = GIT_TIMEOUT_SECONDS) -> str:
+    completed = _run_git(repo_path, args, timeout_seconds=timeout_seconds)
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "unknown error").strip()
         return f"git failed: {detail[:500]}"
     return _truncate(completed.stdout)
 
 
-def _run_git(repo_path: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    repo_path: Path,
+    args: list[str],
+    *,
+    timeout_seconds: float = GIT_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             ["git", *args],
@@ -465,7 +514,7 @@ def _run_git(repo_path: Path, args: list[str]) -> subprocess.CompletedProcess[st
             capture_output=True,
             text=True,
             check=False,
-            timeout=GIT_TIMEOUT_SECONDS,
+            timeout=_git_timeout(timeout_seconds),
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return subprocess.CompletedProcess(["git", *args], 124, "", str(error))
@@ -473,7 +522,18 @@ def _run_git(repo_path: Path, args: list[str]) -> subprocess.CompletedProcess[st
 
 def _sanitize(text: str) -> str:
     redacted = _SECRET_ASSIGNMENT.sub(r"\1=***", text)
-    return _BEARER.sub(r"\1 ***", redacted)
+    redacted = _BEARER.sub(r"\1 ***", redacted)
+    return _URL_CREDENTIALS.sub(r"\1***:***@", redacted)
+
+
+def _git_timeout(value: float | None) -> float:
+    if value is None:
+        return float(GIT_TIMEOUT_SECONDS)
+    return max(0.001, min(float(GIT_TIMEOUT_SECONDS), value))
+
+
+def _remaining_timeout(deadline: float) -> float:
+    return _git_timeout(deadline - time.monotonic())
 
 
 def _unique(values: list[str]) -> list[str]:

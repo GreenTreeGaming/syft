@@ -132,6 +132,25 @@ def test_search_code_is_fixed_string_at_failing_commit(mocker, tmp_path: Path) -
     assert result.count("app/checkout.py") == 20
 
 
+def test_search_code_sanitizes_matching_secrets(mocker, tmp_path: Path) -> None:
+    mocker.patch(
+        "syft.agent.tools.subprocess.run",
+        return_value=__import__("subprocess").CompletedProcess(
+            [], 0, "config.py:1:API_KEY=super-secret-value\n", ""
+        ),
+    )
+    result = execute_tool(
+        "search_code",
+        {"query": "API_KEY"},
+        analysis=REGRESSION,
+        repo_path=tmp_path,
+        history_store=None,
+        repository="owner/repo",
+    )
+    assert "super-secret-value" not in result
+    assert "API_KEY=***" in result
+
+
 def test_search_code_rejects_path_traversal_in_diff(mocker) -> None:
     git = mocker.patch("syft.agent.tools.subprocess.run")
     result = execute_tool(
@@ -178,12 +197,13 @@ def test_inspect_ci_environment_returns_names_not_values(mocker, tmp_path: Path)
         "    runs-on: ubuntu-latest\n"
         "    env:\n"
         "      GITHUB_TOKEN: super-secret-value\n"
+        "      DATABASE_URL: postgres://user:password@example.com/database\n"
         "      PYTEST_ADDOPTS: -q\n"
         "    steps:\n"
         "      - uses: actions/setup-python@v5\n"
         "        with:\n"
         "          python-version: '3.12'\n"
-        "      - run: pip install -e .[dev]\n"
+        "      - run: pip install https://user:password@example.com/private-package.whl\n"
     )
     git = mocker.patch(
         "syft.agent.tools.subprocess.run",
@@ -212,12 +232,60 @@ def test_inspect_ci_environment_returns_names_not_values(mocker, tmp_path: Path)
     assert payload["workflow_name"] == "CI"
     assert payload["runner_os"] == ["ubuntu-latest"]
     assert payload["python_version"] == ["3.12"]
-    assert payload["environment_variable_names"] == ["GITHUB_TOKEN", "PYTEST_ADDOPTS"]
+    assert payload["environment_variable_names"] == ["GITHUB_TOKEN", "DATABASE_URL", "PYTEST_ADDOPTS"]
     assert any("pip install" in item for item in payload["dependency_install_commands"])
     assert payload["failing_step"] == "not recorded"
     assert "super-secret-value" not in json.dumps(payload)
+    assert "postgres://user:password" not in json.dumps(payload)
+    assert "https://user:password@" not in json.dumps(payload)
+    assert "https://***:***@example.com/private-package.whl" in json.dumps(payload)
+    assert "workflow_excerpts" not in payload
     assert git.call_args_list[0].args[0][:5] == ["git", "ls-tree", "-r", "--name-only", "current-sha"]
     assert git.call_args_list[1].args[0][:3] == ["git", "show", "current-sha:.github/workflows/ci.yml"]
+
+
+def test_git_tool_timeout_is_bounded_by_remaining_investigation_time(mocker, tmp_path: Path) -> None:
+    git = mocker.patch(
+        "syft.agent.tools.subprocess.run",
+        return_value=__import__("subprocess").CompletedProcess([], 0, "ok-output", ""),
+    )
+    result = execute_tool(
+        "git_diff",
+        {"path": "app/checkout.py"},
+        analysis=REGRESSION,
+        repo_path=tmp_path,
+        history_store=None,
+        repository="owner/repo",
+        timeout_seconds=2.5,
+    )
+    assert result == "ok-output"
+    assert git.call_args.kwargs["timeout"] == 2.5
+
+
+def test_ci_environment_stops_when_its_tool_budget_expires(mocker, tmp_path: Path) -> None:
+    clock = iter([0.0, 0.1, 1.5])
+    mocker.patch("syft.agent.tools.time.monotonic", side_effect=lambda: next(clock))
+    git = mocker.patch(
+        "syft.agent.tools.subprocess.run",
+        return_value=__import__("subprocess").CompletedProcess(
+            [], 0, ".github/workflows/ci.yml\n", ""
+        ),
+    )
+    payload = json.loads(
+        execute_tool(
+            "inspect_ci_environment",
+            {},
+            analysis=REGRESSION,
+            repo_path=tmp_path,
+            history_store=None,
+            repository="owner/repo",
+            timeout_seconds=1.0,
+        )
+    )
+    assert payload["workflow_files"] == [".github/workflows/ci.yml"]
+    assert payload["runner_os"] == []
+    assert git.call_count == 1
+    assert git.call_args.kwargs["timeout"] == 0.9
 
 
 def test_search_history_returns_prior_classifications(tmp_path: Path) -> None:

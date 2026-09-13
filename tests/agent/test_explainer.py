@@ -242,8 +242,8 @@ def test_from_environment_keeps_the_passed_history_store(
         assert provider.history_store is store
         assert provider._owns_history is False
         assert provider.max_turns == 5
-        assert provider.max_tool_calls == 12
-        assert provider.investigation_timeout_seconds == 90.0
+        assert provider.max_tool_calls == 8
+        assert provider.investigation_timeout_seconds == 60.0
     finally:
         provider.close()
     leftover = store.recent_history("owner/repo", "tests/test_flaky.py::test_flaky")
@@ -251,7 +251,7 @@ def test_from_environment_keeps_the_passed_history_store(
     assert leftover[0].workflow_run_id == 42
 
 
-def test_tool_call_cap_falls_back_after_twelve_calls(
+def test_tool_call_cap_falls_back_after_eight_calls(
     workflow_analysis: WorkflowAnalysis, mocker, tmp_path: Path
 ) -> None:
     mocker.patch(
@@ -272,7 +272,7 @@ def test_tool_call_cap_falls_back_after_twelve_calls(
                         "name": "read_file",
                         "arguments": json.dumps({"path": "tests/test_flaky.py"}),
                     }
-                    for index in range(12)
+                    for index in range(8)
                 ]
             },
         )
@@ -288,7 +288,7 @@ def test_tool_call_cap_falls_back_after_twelve_calls(
         provider.close()
     assert "Flaky behavior detected" in result.headline
     assert requests["count"] == 1
-    assert len(provider.tool_trace) == 12
+    assert len(provider.tool_trace) == 8
     assert provider.investigations[0].hit_tool_cap is True
     assert provider.investigations[0].used_template_fallback is True
 
@@ -303,7 +303,7 @@ def test_investigation_timeout_falls_back_without_reclassifying(
         if current == 0.0:
             clock["value"] = 0.1
         else:
-            clock["value"] = 91.0
+            clock["value"] = 61.0
         return current
 
     mocker.patch("syft.agent.explainer.time.monotonic", side_effect=monotonic)
@@ -329,5 +329,6 @@ def test_investigation_timeout_falls_back_without_reclassifying(
         provider.close()
     assert result.headline.startswith("Flaky behavior detected")
     assert provider.investigations[0].timed_out is True
+    assert provider.investigations[0].hit_tool_cap is False
     assert provider.investigations[0].used_template_fallback is True
-    assert len(provider.tool_trace) == 1
+    assert provider.tool_trace == []
