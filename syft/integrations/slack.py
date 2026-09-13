@@ -27,14 +27,17 @@ class SlackWebhookClient:
         try:
             response = self._client.post(self.webhook_url, json={"text": digest})
             response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            raise IntegrationError(
+                f"Slack webhook failed with HTTP {error.response.status_code}"
+            ) from error
         except httpx.HTTPError as error:
-            raise IntegrationError(f"Slack webhook failed: {error}") from error
+            raise IntegrationError("Slack webhook request failed") from error
         if response.text.strip() != "ok":
-            raise IntegrationError(f"Slack webhook returned an unexpected response: {response.text[:200]}")
+            raise IntegrationError("Slack webhook returned an unexpected response")
         return ActionResult(
             action_id=action_id,
             kind=ActionKind.SLACK_DIGEST,
             status=ActionStatus.CREATED,
             detail="Slack digest posted.",
         )
-
