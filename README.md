@@ -13,7 +13,7 @@ Syft turns a failed pytest test into a structured, versioned `TestAnalysis`. Cla
 - sanitized JSON traces with stable `analysis_id` values
 - evaluation metrics, including the safety-critical `REGRESSION -> FLAKY` count
 
-This repository intentionally does not contain the LLM agent, Slack/Linear integrations, or pull-request automation.
+The downstream action agent is included, but it cannot change the deterministic label or confidence. It uses an LLM only to explain already-classified evidence, then routes flaky tests to quarantine PRs, regressions to Linear issues, ambiguous results to human triage, and posts one Slack digest.
 
 ## Setup
 
@@ -112,6 +112,14 @@ The coordinator discovers the newest failed run, finds the prior successful run,
 ```bash
 python -m pytest
 ```
+
+Pull requests and pushes to `main` run the complete suite on Python 3.12 and 3.14. CI also executes a 15-case, hand-labeled boundary benchmark:
+
+```bash
+python -m syft.eval.benchmark --input eval/classifier_benchmark.json
+```
+
+The benchmark covers mixed reruns, persistent failures, conflicting prior-commit evidence, related-code conflicts, timeouts, missing evidence, and all-pass reruns. It fails the process if any expected label is missed or if any regression false negative occurs. The separate fixture-repository evaluation remains the end-to-end check against real pytest, Git, and GitHub Actions evidence.
 
 ## Run the action agent
 
