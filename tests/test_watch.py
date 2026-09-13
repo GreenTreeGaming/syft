@@ -8,6 +8,7 @@ from syft.agent.explainer import TemplateExplainer
 from syft.agent.models import ActionKind, ActionResult, ActionStatus, AgentRun
 from syft.agent.state import ActionLedger
 from syft.deterministic.github_runs import GitHubRun
+from syft.history.store import HistoryStore
 from syft.models.analysis import WorkflowAnalysis
 from syft.watch import (
     ProcessedRunLedger,
@@ -104,6 +105,28 @@ def test_dry_run_does_not_suppress_later_execution(tmp_path: Path) -> None:
     reloaded = ProcessedRunLedger(tmp_path / "watch-state.json")
     assert reloaded.completed("owner/repo", "main", 42, execute=False)
     assert reloaded.completed("owner/repo", "main", 42, execute=True)
+
+
+def test_successful_cycle_records_history_in_agent_artifact(
+    workflow_analysis: WorkflowAnalysis,
+    tmp_path: Path,
+    mocker,
+) -> None:
+    with HistoryStore(tmp_path / "history.sqlite") as history_store:
+        watcher = _watcher(
+            tmp_path,
+            workflow_analysis,
+            mocker.Mock(return_value=workflow_analysis),
+        )
+        watcher.history_store = history_store
+        result = watcher.run_cycle()
+        records = history_store.repository_history("owner/repo")
+
+    payload = json.loads(result.agent_run_path.read_text(encoding="utf-8"))
+    assert len(records) == 3
+    assert payload["history"]["records"] == 3
+    assert payload["history"]["workflow_runs"] == 1
+    assert payload["history"]["by_test"]["tests/test_flaky.py::test_flaky"]["flaky_count"] == 1
 
 
 def test_no_failed_run_is_a_normal_cycle(

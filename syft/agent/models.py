@@ -7,6 +7,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from syft.history.models import WorkflowHistorySummary
 from syft.models.analysis import Classification
 
 
@@ -71,3 +72,4 @@ class AgentRun(AgentModel):
     plans: list[ActionPlan]
     results: list[ActionResult]
     slack_digest: str
+    history: WorkflowHistorySummary | None = None

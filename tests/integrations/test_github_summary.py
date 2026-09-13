@@ -10,6 +10,8 @@ from syft.integrations.github_summary import (
     render_pr_summary,
     summary_marker,
 )
+from syft.history.store import HistoryStore
+from syft.history.summary import workflow_history_summary
 from syft.models.analysis import WorkflowAnalysis
 
 
@@ -43,7 +45,7 @@ def test_renders_escaped_evidence_table_and_action_links(
 
     assert body.startswith(summary_marker())
     assert "**3 failed tests:** 1 flaky · 1 regression · 1 needs triage" in body
-    assert "| Test | Classification | Confidence | Isolated reruns | Evidence | Action |" in body
+    assert "| Test | Classification | Confidence | Isolated reruns | History | Evidence | Action |" in body
     assert "tests/test_checkout.py::test_checkout" in body
     assert "2 passed / 3 failed" in body
     assert "timing \\| state &lt;script&gt;alert\\(1\\)&lt;/script&gt;" in body
@@ -158,3 +160,23 @@ def test_unsafe_action_url_is_not_linked(workflow_analysis: WorkflowAnalysis) ->
 
     assert "javascript:" not in body
     assert "Created" in body
+
+
+def test_renders_historical_context(
+    workflow_analysis: WorkflowAnalysis,
+    tmp_path,
+) -> None:
+    plans, results = _action_results(workflow_analysis)
+    with HistoryStore(tmp_path / "history.sqlite") as store:
+        store.record_workflow(workflow_analysis)
+        history = workflow_history_summary(store, workflow_analysis)
+
+    body = render_pr_summary(
+        workflow_analysis,
+        plans,
+        results,
+        history=history,
+    )
+
+    assert "1 occurrence\\(s\\); 100% flaky; 40% rerun pass; 0 consecutive all-fail" in body
+    assert "Historical coverage:** 3 observations across 3 tests and 1 workflow runs" in body

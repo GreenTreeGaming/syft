@@ -1,9 +1,13 @@
 from pathlib import Path
 
+import pytest
+
 from syft.agent.explainer import TemplateExplainer
 from syft.agent.models import ActionKind, ActionResult, ActionStatus
 from syft.agent.orchestrator import run_agent
 from syft.agent.state import ActionLedger
+from syft.history.store import HistoryStore
+from syft.history.summary import workflow_history_summary
 from syft.models.analysis import WorkflowAnalysis
 
 
@@ -156,3 +160,43 @@ def test_execute_publishes_github_pr_summary(
     assert len(passed_plans) == 3
     assert len(passed_results) == 3
     assert any(item.kind is ActionKind.GITHUB_PR_SUMMARY for item in result.results)
+
+
+def test_history_is_read_only_context_for_slack_and_agent_run(
+    workflow_analysis: WorkflowAnalysis,
+    tmp_path: Path,
+) -> None:
+    original_labels = [item.classification for item in workflow_analysis.analyses]
+    with HistoryStore(tmp_path / "history.sqlite") as store:
+        store.record_workflow(workflow_analysis)
+        history = workflow_history_summary(store, workflow_analysis)
+    result = run_agent(
+        workflow_analysis,
+        TemplateExplainer(),
+        ActionLedger(tmp_path / "state.json"),
+        history=history,
+    )
+
+    assert result.history == history
+    assert "history: 1 occurrence(s), 100% flaky, 40% rerun pass rate" in result.slack_digest
+    assert "History: 3 observations across 3 tests and 1 workflow runs" in result.slack_digest
+    assert [item.classification for item in workflow_analysis.analyses] == original_labels
+
+
+def test_rejects_history_from_another_repository(
+    workflow_analysis: WorkflowAnalysis,
+    tmp_path: Path,
+) -> None:
+    with HistoryStore(tmp_path / "history.sqlite") as store:
+        store.record_workflow(workflow_analysis)
+        history = workflow_history_summary(store, workflow_analysis).model_copy(
+            update={"repository": "other/repository"}
+        )
+
+    with pytest.raises(ValueError, match="History repository"):
+        run_agent(
+            workflow_analysis,
+            TemplateExplainer(),
+            ActionLedger(tmp_path / "state.json"),
+            history=history,
+        )

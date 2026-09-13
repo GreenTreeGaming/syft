@@ -5,9 +5,15 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 
-from syft.history.models import FlakyRecurrence, HistoryRecord, TrendSummary
+from syft.history.models import (
+    FlakyRecurrence,
+    HistoryRecord,
+    TestHistorySummary,
+    TrendSummary,
+    WorkflowHistorySummary,
+)
 from syft.history.store import HistoryStore
-from syft.models.analysis import Classification
+from syft.models.analysis import Classification, WorkflowAnalysis
 
 
 def historical_pass_rate(records: Sequence[HistoryRecord]) -> float:
@@ -113,6 +119,44 @@ def trend_summary(store: HistoryStore, repository: str, *, flaky_minimum: int = 
         workflow_runs=len(runs),
         recurring_flaky=recurring,
         text="\n".join(lines),
+    )
+
+
+def workflow_history_summary(
+    store: HistoryStore,
+    workflow: WorkflowAnalysis,
+    *,
+    limit: int = 20,
+) -> WorkflowHistorySummary:
+    """Build bounded historical context for the tests in one classified workflow."""
+
+    if limit < 1:
+        raise ValueError("history limit must be >= 1")
+    repository_records = store.repository_history(workflow.repository)
+    by_test: dict[str, TestHistorySummary] = {}
+    for analysis in workflow.analyses:
+        records = store.recent_history(
+            workflow.repository,
+            analysis.test.node_id,
+            limit=limit,
+        )
+        flaky_count = sum(
+            item.classification is Classification.FLAKY for item in records
+        )
+        by_test[analysis.test.node_id] = TestHistorySummary(
+            test_node_id=analysis.test.node_id,
+            observations=len(records),
+            flaky_count=flaky_count,
+            flaky_occurrence_rate=flaky_occurrence_rate(records),
+            rerun_pass_rate=historical_pass_rate(records),
+            consecutive_all_failures=consecutive_failures(records),
+        )
+    return WorkflowHistorySummary(
+        repository=workflow.repository,
+        records=len(repository_records),
+        tests=len({item.test_node_id for item in repository_records}),
+        workflow_runs=len({item.workflow_run_id for item in repository_records}),
+        by_test=by_test,
     )
 
 

@@ -42,3 +42,24 @@ class TrendSummary(StrictModel):
     workflow_runs: int = Field(ge=0)
     recurring_flaky: list[FlakyRecurrence] = Field(default_factory=list)
     text: str
+
+
+class TestHistorySummary(StrictModel):
+    """Recent historical evidence for one currently failing test."""
+
+    test_node_id: str
+    observations: int = Field(ge=0)
+    flaky_count: int = Field(ge=0)
+    flaky_occurrence_rate: float = Field(ge=0.0, le=1.0)
+    rerun_pass_rate: float = Field(ge=0.0, le=1.0)
+    consecutive_all_failures: int = Field(ge=0)
+
+
+class WorkflowHistorySummary(StrictModel):
+    """Read-only historical context attached after deterministic classification."""
+
+    repository: str
+    records: int = Field(ge=0)
+    tests: int = Field(ge=0)
+    workflow_runs: int = Field(ge=0)
+    by_test: dict[str, TestHistorySummary] = Field(default_factory=dict)

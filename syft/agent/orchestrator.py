@@ -13,6 +13,7 @@ from syft.integrations.github import GitHubQuarantineClient
 from syft.integrations.github_summary import GitHubPRSummaryClient, summary_action_id
 from syft.integrations.linear import LinearClient
 from syft.integrations.slack import SlackWebhookClient
+from syft.history.models import WorkflowHistorySummary
 from syft.models.analysis import WorkflowAnalysis
 
 
@@ -27,7 +28,10 @@ def run_agent(
     slack: SlackWebhookClient | None = None,
     github_summary: GitHubPRSummaryClient | None = None,
     publish_github_summary: bool = False,
+    history: WorkflowHistorySummary | None = None,
 ) -> AgentRun:
+    if history is not None and history.repository != workflow.repository:
+        raise ValueError("History repository does not match workflow repository")
     plans = build_action_plans(workflow, explainer)
     results: list[ActionResult] = []
 
@@ -94,7 +98,12 @@ def run_agent(
             )
         else:
             try:
-                summary_result = github_summary.upsert_summary(workflow, plans, list(results))
+                summary_result = github_summary.upsert_summary(
+                    workflow,
+                    plans,
+                    list(results),
+                    history=history,
+                )
             except IntegrationError as error:
                 summary_result = ActionResult(
                     action_id=summary_id,
@@ -104,7 +113,7 @@ def run_agent(
                 )
         results.append(summary_result)
 
-    digest = build_slack_digest(workflow, results)
+    digest = build_slack_digest(workflow, results, history=history)
     digest_id = _digest_action_id(workflow.workflow_analysis_id)
     if dry_run:
         results.append(
@@ -155,14 +164,22 @@ def run_agent(
         plans=plans,
         results=results,
         slack_digest=digest,
+        history=history,
     )
 
 
-def build_slack_digest(workflow: WorkflowAnalysis, results: list[ActionResult]) -> str:
+def build_slack_digest(
+    workflow: WorkflowAnalysis,
+    results: list[ActionResult],
+    *,
+    history: WorkflowHistorySummary | None = None,
+) -> str:
+    if history is not None and history.repository != workflow.repository:
+        raise ValueError("History repository does not match workflow repository")
     links = {result.action_id: result.url for result in results if result.url}
     statuses = {result.action_id: result.status for result in results}
     lines = [
-        f"*Syft CI triage* — `{workflow.repository}` run `{workflow.workflow_run_id}`",
+        f"*Syft CI triage* — `{_slack_code(workflow.repository)}` run `{workflow.workflow_run_id}`",
         (
             f"*{workflow.summary.total} failures:* {workflow.summary.flaky} flaky · "
             f"{workflow.summary.regression} regression · {workflow.summary.escalate} needs triage"
@@ -183,9 +200,22 @@ def build_slack_digest(workflow: WorkflowAnalysis, results: list[ActionResult]) 
             action = "action already exists"
         else:
             action = "action planned"
+        trend = history.by_test.get(analysis.test.node_id) if history else None
+        history_note = ""
+        if trend:
+            history_note = (
+                f" — history: {trend.observations} occurrence(s), "
+                f"{trend.flaky_occurrence_rate:.0%} flaky, "
+                f"{trend.rerun_pass_rate:.0%} rerun pass rate"
+            )
         lines.append(
-            f"• `{analysis.test.name}` — *{analysis.classification.value}* "
-            f"({analysis.confidence:.0%}) — {action}"
+            f"• `{_slack_code(analysis.test.name)}` — *{analysis.classification.value}* "
+            f"({analysis.confidence:.0%}) — {action}{history_note}"
+        )
+    if history:
+        lines.append(
+            f"_History: {history.records} observations across {history.tests} tests "
+            f"and {history.workflow_runs} workflow runs._"
         )
     lines.append("_Classifications are deterministic; the LLM only explains the evidence._")
     return "\n".join(lines)
@@ -199,3 +229,15 @@ def _digest_action_id(workflow_id: str) -> str:
 def _action_id(workflow_id: str, test_node_id: str, kind: ActionKind) -> str:
     digest = hashlib.sha256(f"{workflow_id}\0{test_node_id}\0{kind.value}".encode()).hexdigest()[:20]
     return f"act_{digest}"
+
+
+def _slack_code(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("@", "＠")
+        .replace("`", "'")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
