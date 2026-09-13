@@ -128,6 +128,49 @@ def test_openai_explainer_reads_file_through_tool_loop(
     assert recorded.used_template_fallback is False
 
 
+def test_explainer_logs_turns_and_tools_without_tool_output(
+    workflow_analysis: WorkflowAnalysis, mocker, tmp_path: Path, caplog
+) -> None:
+    explanation = Explanation.model_validate_json(_explanation_json())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if any(
+            isinstance(item, dict) and item.get("type") == "function_call_output"
+            for item in payload.get("input", [])
+            if isinstance(item, dict)
+        ):
+            return httpx.Response(200, json=_message(explanation.model_dump_json()))
+        return httpx.Response(
+            200,
+            json=_function_call("read_file", {"path": "app/checkout.py"}),
+        )
+
+    mocker.patch(
+        "syft.agent.tools.subprocess.run",
+        return_value=subprocess.CompletedProcess([], 0, "def calculate(): SECRET=should-not-log\n", ""),
+    )
+    caplog.set_level("INFO", logger="syft.agent.explainer")
+    provider = OpenAIExplainer(
+        "test-key",
+        repo_path=tmp_path,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        provider.explain(workflow_analysis.analyses[1])
+    finally:
+        provider.close()
+    text = caplog.text
+    assert "explain_start" in text
+    assert "explain_turn" in text
+    assert "explain_tool" in text
+    assert "tool=read_file" in text
+    assert "path=app/checkout.py" in text
+    assert "explain_done" in text
+    assert "template_fallback=False" in text
+    assert "SECRET=should-not-log" not in text
+    assert "def calculate" not in text
+
 def test_turn_cap_falls_back_to_template(
     workflow_analysis: WorkflowAnalysis, mocker, tmp_path: Path
 ) -> None:
@@ -296,15 +339,13 @@ def test_tool_call_cap_falls_back_after_eight_calls(
 def test_investigation_timeout_falls_back_without_reclassifying(
     workflow_analysis: WorkflowAnalysis, mocker, tmp_path: Path
 ) -> None:
-    clock = {"value": 0.0}
+    clock = {"n": 0}
 
     def monotonic() -> float:
-        current = clock["value"]
-        if current == 0.0:
-            clock["value"] = 0.1
-        else:
-            clock["value"] = 61.0
-        return current
+        clock["n"] += 1
+        if clock["n"] < 6:
+            return clock["n"] * 0.01
+        return 61.0
 
     mocker.patch("syft.agent.explainer.time.monotonic", side_effect=monotonic)
     mocker.patch(

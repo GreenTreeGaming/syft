@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -14,6 +15,10 @@ from syft.agent.models import Explanation, Investigation, ToolCallRecord
 from syft.agent.tools import TOOL_SCHEMAS, allowed_paths, execute_tool, tool_ok
 from syft.history.store import HistoryStore
 from syft.models.analysis import Classification, TestAnalysis
+
+LOGGER = logging.getLogger(__name__)
+_SAFE_ARG_KEYS = ("path", "attempt", "query", "start_line", "end_line", "limit")
+_QUERY_LOG_LIMIT = 80
 
 _INSTRUCTIONS = (
     "You explain a deterministic CI classification. The classification and confidence in the "
@@ -166,11 +171,25 @@ class OpenAIExplainer:
 
     def explain(self, analysis: TestAnalysis) -> Explanation:
         self.tool_trace = []
+        started = time.monotonic()
+        LOGGER.info(
+            "explain_start analysis_id=%s test=%s classification=%s",
+            analysis.analysis_id,
+            analysis.test.node_id,
+            analysis.classification.value,
+        )
         try:
             explanation, turns, timed_out, hit_tool_cap, fallback = self._explain_with_tools(analysis)
-        except ExplanationError:
+        except ExplanationError as error:
             explanation = TemplateExplainer().explain(analysis)
             self._record_investigation(analysis, turns=0, fallback=True, timed_out=False, hit_tool_cap=False)
+            LOGGER.warning(
+                "explain_failed analysis_id=%s classification=%s error_type=%s template_fallback=true elapsed_ms=%s",
+                analysis.analysis_id,
+                analysis.classification.value,
+                type(error).__name__,
+                _elapsed_ms(started),
+            )
             return explanation
         self._record_investigation(
             analysis,
@@ -178,6 +197,18 @@ class OpenAIExplainer:
             fallback=fallback,
             timed_out=timed_out,
             hit_tool_cap=hit_tool_cap,
+        )
+        LOGGER.info(
+            "explain_done analysis_id=%s classification=%s turns=%s tools=%s timed_out=%s "
+            "hit_tool_cap=%s template_fallback=%s elapsed_ms=%s",
+            analysis.analysis_id,
+            analysis.classification.value,
+            turns,
+            len(self.tool_trace),
+            timed_out,
+            hit_tool_cap,
+            fallback,
+            _elapsed_ms(started),
         )
         return explanation
 
@@ -226,8 +257,24 @@ class OpenAIExplainer:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
+                LOGGER.warning(
+                    "explain_timeout analysis_id=%s turn=%s/%s tools=%s",
+                    analysis.analysis_id,
+                    turns,
+                    self.max_turns,
+                    len(self.tool_trace),
+                )
                 break
             turns += 1
+            LOGGER.info(
+                "explain_turn analysis_id=%s classification=%s turn=%s/%s tools=%s remaining_ms=%s",
+                analysis.analysis_id,
+                analysis.classification.value,
+                turns,
+                self.max_turns,
+                len(self.tool_trace),
+                int(remaining * 1000),
+            )
             payload = {
                 "model": self.model_name,
                 "store": False,
@@ -247,19 +294,38 @@ class OpenAIExplainer:
                 "metadata": {"analysis_id": analysis.analysis_id},
             }
             try:
+                request_started = time.monotonic()
                 response = self._client.post("/responses", json=payload, timeout=min(60.0, remaining))
                 response.raise_for_status()
                 result = response.json()
             except (httpx.TimeoutException, httpx.HTTPError, ValueError) as error:
                 if isinstance(error, httpx.TimeoutException) or time.monotonic() >= deadline:
                     timed_out = True
+                    LOGGER.warning(
+                        "explain_timeout analysis_id=%s turn=%s error_type=%s",
+                        analysis.analysis_id,
+                        turns,
+                        type(error).__name__,
+                    )
                     break
                 raise ExplanationError(f"OpenAI explanation failed: {error}") from error
+            LOGGER.info(
+                "explain_openai analysis_id=%s turn=%s openai_ms=%s",
+                analysis.analysis_id,
+                turns,
+                _elapsed_ms(request_started),
+            )
             calls = _function_calls(result)
             if calls:
                 remaining_slots = self.max_tool_calls - len(self.tool_trace)
                 if remaining_slots <= 0:
                     hit_tool_cap = True
+                    LOGGER.warning(
+                        "explain_tool_cap analysis_id=%s tools=%s max_tool_calls=%s",
+                        analysis.analysis_id,
+                        len(self.tool_trace),
+                        self.max_tool_calls,
+                    )
                     break
                 if len(calls) > remaining_slots:
                     calls = calls[:remaining_slots]
@@ -271,7 +337,15 @@ class OpenAIExplainer:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         timed_out = True
+                        LOGGER.warning(
+                            "explain_timeout analysis_id=%s turn=%s/%s tools=%s",
+                            analysis.analysis_id,
+                            turns,
+                            self.max_turns,
+                            len(self.tool_trace),
+                        )
                         break
+                    tool_started = time.monotonic()
                     output = execute_tool(
                         call["name"],
                         call["arguments"],
@@ -281,11 +355,21 @@ class OpenAIExplainer:
                         repository=self.repository,
                         timeout_seconds=remaining,
                     )
+                    ok = tool_ok(output)
+                    LOGGER.info(
+                        "explain_tool analysis_id=%s turn=%s tool=%s ok=%s elapsed_ms=%s %s",
+                        analysis.analysis_id,
+                        turns,
+                        call["name"],
+                        ok,
+                        _elapsed_ms(tool_started),
+                        _safe_tool_args(call["arguments"]),
+                    )
                     self.tool_trace.append(
                         {
                             "name": call["name"],
                             "arguments": call["arguments"],
-                            "ok": tool_ok(output),
+                            "ok": ok,
                             "preview": output[:200],
                         }
                     )
@@ -300,6 +384,12 @@ class OpenAIExplainer:
                     break
                 if hit_tool_cap or len(self.tool_trace) >= self.max_tool_calls:
                     hit_tool_cap = True
+                    LOGGER.warning(
+                        "explain_tool_cap analysis_id=%s tools=%s max_tool_calls=%s",
+                        analysis.analysis_id,
+                        len(self.tool_trace),
+                        self.max_tool_calls,
+                    )
                     break
                 continue
             try:
@@ -329,6 +419,23 @@ def _function_calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
         name = item.get("name") or ""
         calls.append({"name": str(name), "arguments": parsed, "call_id": str(call_id)})
     return calls
+
+
+def _safe_tool_args(arguments: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in _SAFE_ARG_KEYS:
+        if key not in arguments:
+            continue
+        value = arguments[key]
+        text = str(value).replace("\n", " ").replace("\r", " ")
+        if key == "query" and len(text) > _QUERY_LOG_LIMIT:
+            text = text[:_QUERY_LOG_LIMIT] + "..."
+        parts.append(f"{key}={text}")
+    return " ".join(parts)
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
 
 
 def _response_output_text(payload: dict[str, Any]) -> str:
