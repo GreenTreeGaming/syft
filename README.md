@@ -1,6 +1,6 @@
-# Syft deterministic CI triage
+# Syft: A constrained multi-app AI agent for reliable CI triage
 
-Syft turns a failed pytest test into a structured, versioned `TestAnalysis`. Classification is entirely deterministic: an LLM never decides whether a failure is `FLAKY`, `REGRESSION`, or `ESCALATE`.
+Syft monitors failed CI runs, gathers reproducible evidence, and coordinates bounded actions across GitHub, Linear, and Slack. Its AI investigator chooses read-only tools to explain each failure, while deterministic policy retains control of every `FLAKY`, `REGRESSION`, or `ESCALATE` classification.
 
 Judge-facing material: [system and reliability brief](docs/system-reliability-brief.md), [two-minute demo script](docs/demo-script.md), and [submission checklist](docs/submission-checklist.md).
 
@@ -16,8 +16,10 @@ Judge-facing material: [system and reliability brief](docs/system-reliability-br
 - evaluation metrics, including the safety-critical `REGRESSION -> FLAKY` count
 - an idempotent evidence summary posted directly on the failed branch's pull request
 - local SQLite test history with flaky frequency, rerun pass rate, and consecutive-failure trends
+- a bounded AI investigation loop with exact-commit source, diff, rerun, CI, and history tools
+- persisted per-test tool traces with five-turn, eight-call, and 60-second safety limits
 
-The downstream action agent is included, but it cannot change the deterministic label or confidence. It uses an LLM only to explain already-classified evidence, then routes flaky tests to quarantine PRs, regressions to Linear issues, ambiguous results to human triage, and posts one Slack digest.
+The agent cannot change the deterministic label or confidence. It investigates and explains already-classified evidence, then a fixed policy routes flaky tests to GitHub quarantine PRs, regressions to Linear issues, ambiguous results to human triage, and posts one Slack digest.
 
 ## Setup
 

@@ -20,17 +20,20 @@ flowchart LR
     C --> F[Deterministic classifier]
     D --> F
     E --> F
-    F -->|FLAKY| G[Quarantine PR]
-    F -->|REGRESSION| H[Linear regression ticket]
-    F -->|ESCALATE| I[Linear human-triage ticket]
     F --> J[Immutable evidence package]
-    J --> K[LLM explanation only]
+    J --> K[Bounded AI investigation]
+    K <--> T[Read-only source, diff, rerun, CI, and history tools]
+    F --> P[Deterministic policy gate]
+    K --> P
+    P -->|FLAKY| G[GitHub quarantine PR]
+    P -->|REGRESSION| H[Linear regression ticket]
+    P -->|ESCALATE| I[Linear human-triage ticket]
+    P --> Q[GitHub PR evidence summary]
     G --> L[One Slack digest]
     H --> L
     I --> L
-    K --> G
-    K --> H
-    K --> I
+    Q --> L
+    P --> M[SQLite history and audit trace]
 ```
 
 ## Deterministic decision policy
