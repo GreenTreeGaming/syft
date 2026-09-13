@@ -8,6 +8,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from syft.agent.explainer import ExplanationError, OpenAIExplainer, TemplateExplainer
@@ -50,9 +51,59 @@ def main(argv: list[str] | None = None) -> int:
         return _poll_main(arguments[1:])
     if arguments[:1] == ["watch"]:
         return _watch_main(arguments[1:])
+    if arguments[:1] == ["demo"]:
+        return _demo_main(arguments[1:])
     if arguments[:1] == ["analyze"]:
         arguments = arguments[1:]
     return _analyze_main(arguments)
+
+
+def _demo_main(argv: list[str]) -> int:
+    """Run the complete maintained fixture demo with isolated local state."""
+    parser = argparse.ArgumentParser(description="Run the complete Syft hackathon demo")
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=Path(__file__).resolve().parents[2] / "syft-testing",
+        help="local fixture checkout (defaults to the sibling syft-testing repository)",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="plan actions without external writes")
+    arguments = parser.parse_args(argv)
+
+    demo_directory = Path(tempfile.mkdtemp(prefix="syft-demo-"))
+    print(f"Syft demo workspace: {demo_directory}", file=sys.stderr)
+    execution_flag = "--dry-run" if arguments.dry_run else "--execute"
+    return _watch_main(
+        [
+            "--repo",
+            str(arguments.repo),
+            "--github-repository",
+            "GreenTreeGaming/syft-testing",
+            "--branch",
+            "codex/regression-fixture",
+            "--green-branch",
+            "main",
+            "--artifact-name",
+            "pytest-junit",
+            "--attempts",
+            "5",
+            "--timeout",
+            "60",
+            "--use-openai",
+            execution_flag,
+            "--once",
+            "--watch-state-file",
+            str(demo_directory / "watch-state.json"),
+            "--action-state-file",
+            str(demo_directory / "action-state.json"),
+            "--history-db",
+            str(demo_directory / "history.sqlite3"),
+            "--output-dir",
+            str(demo_directory / "runs"),
+            "--trace-dir",
+            str(demo_directory / "traces"),
+        ]
+    )
 
 
 def _analyze_main(argv: list[str]) -> int:

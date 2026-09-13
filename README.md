@@ -12,6 +12,8 @@ The pipeline has three stages. Only the middle one is the agent.
 2. **Agent loop.** The model may call the read-only tools above and write an explanation. Caps: five turns, eight tool calls, 60 seconds. If it hits a cap or errors, Syft falls back to a template explanation. The label does not change.
 3. **Deterministic routing.** `FLAKY` opens a quarantine PR. `REGRESSION` opens a Linear issue. `ESCALATE` opens a Linear triage issue. Every run also gets one PR comment and one Slack digest.
 
+Credential-safe structured logs record every investigation turn, tool call, safe argument, and duration without dumping tool output.
+
 ```mermaid
 flowchart TD
   A[Failed GitHub Actions run] --> B[Parse JUnit]
@@ -85,6 +87,16 @@ cp .env.example .env
 ```
 
 Set `GITHUB_TOKEN` and `GITHUB_REPOSITORY=owner/repo` when using GitHub run discovery.
+
+## Run the complete hackathon demo
+
+With the maintained `syft-testing` fixture cloned beside this repository and the GitHub, OpenAI, Linear, and Slack credentials already configured, launch the full three-app workflow with one command:
+
+```bash
+python -m syft demo
+```
+
+The demo command discovers the maintained failed workflow, performs five isolated reruns, runs the bounded OpenAI investigation, executes the GitHub, Linear, and Slack actions, records SQLite history, and saves traces and JSON in a fresh temporary workspace. Because `demo` performs real external writes, use `python -m syft demo --dry-run` for a no-write rehearsal. Use `--repo /path/to/syft-testing` only when the fixture repository is not cloned beside Syft.
 
 ## Run an analysis
 
