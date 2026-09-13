@@ -1,39 +1,90 @@
-# Syft: A constrained multi-app AI agent for reliable CI triage
+# Syft
 
-Syft monitors failed CI runs, gathers reproducible evidence, and coordinates bounded actions across GitHub, Linear, and Slack. Its AI investigator chooses read-only tools to explain each failure, while deterministic policy retains control of every `FLAKY`, `REGRESSION`, or `ESCALATE` classification.
+## Project overview
 
-Judge-facing material: [system and reliability brief](docs/system-reliability-brief.md), [two-minute demo script](docs/demo-script.md), and [submission checklist](docs/submission-checklist.md).
+Syft is an agent that triages a failed CI run and then acts in GitHub, Linear, and Slack. After each failing test is labeled, the agent can choose tools: read source at the failing commit, diff it against last green, search the tree, fetch one rerun's output, inspect the GitHub Actions workflow, and look up prior Syft labels. It batches those calls, writes an explanation, and stops at five turns, eight tool calls, or 60 seconds.
 
-## What is included
+The differentiator is what that agent is not allowed to choose. CI fails for different reasons: a flake, a real regression, or not enough evidence. The costly mistake is skipping a real regression as if it were flaky. Fixed rules set `FLAKY`, `REGRESSION`, and `ESCALATE`. The model's output schema has no classification field, so a tool call cannot change the label. Routing follows the label: quarantine PR, Linear ticket, or triage ticket, plus one PR comment and one Slack digest.
 
-- GitHub Actions failed/last-green run discovery and safe JUnit artifact download
-- pytest JUnit failure parsing
-- five isolated pytest reruns with timeout evidence
-- Git diff plus direct-import analysis using Python's AST
-- optional previous-commit verification in a temporary Git worktree
-- pure, explainable classification rules that favor `ESCALATE` when evidence is missing
-- sanitized JSON traces with stable `analysis_id` values
-- evaluation metrics, including the safety-critical `REGRESSION -> FLAKY` count
-- an idempotent evidence summary posted directly on the failed branch's pull request
-- local SQLite test history with flaky frequency, rerun pass rate, and consecutive-failure trends
-- a bounded AI investigation loop with exact-commit source, diff, rerun, CI, and history tools
-- persisted per-test tool traces with five-turn, eight-call, and 60-second safety limits
+The pipeline has three stages. Only the middle one is the agent.
 
-The agent cannot change the deterministic label or confidence. It investigates and explains already-classified evidence, then a fixed policy routes flaky tests to GitHub quarantine PRs, regressions to Linear issues, ambiguous results to human triage, and posts one Slack digest.
+1. **Deterministic evidence and label.** Syft pulls the failed GitHub Actions run, parses JUnit, reruns each failing test five times, diffs against last green, and applies the rules. Label and confidence are finished before any model call.
+2. **Agent loop.** The model may call the read-only tools above and write an explanation. Caps: five turns, eight tool calls, 60 seconds. If it hits a cap or errors, Syft falls back to a template explanation. The label does not change.
+3. **Deterministic routing.** `FLAKY` opens a quarantine PR. `REGRESSION` opens a Linear issue. `ESCALATE` opens a Linear triage issue. Every run also gets one PR comment and one Slack digest.
+
+```mermaid
+flowchart TD
+  A[Failed GitHub Actions run] --> B[Parse JUnit]
+  B --> C[Rerun each test 5 times]
+  B --> D[Diff vs last green + related files]
+  C --> E[Fixed rules: FLAKY / REGRESSION / ESCALATE]
+  D --> E
+  E --> F[Agent: pick read-only tools]
+  F --> G[read / diff / search / rerun / CI / history]
+  G --> F
+  F --> H[Structured explanation]
+  E --> I[Route by the existing label]
+  H --> I
+  I -->|FLAKY| J[GitHub quarantine PR]
+  I -->|REGRESSION| K[Linear regression ticket]
+  I -->|ESCALATE| L[Linear triage ticket]
+  I --> M[PR comment + Slack digest]
+
+  classDef det fill:#e8edf7,stroke:#3d4f6f,color:#111
+  classDef agent fill:#d8f5ea,stroke:#1f7a5c,color:#111
+  class A,B,C,D,E,I,J,K,L,M det
+  class F,G,H agent
+```
+
+Gray is deterministic. Green is the agent loop.
+
+## External apps
+
+Syft connects to three apps:
+
+| App | What Syft does |
+| --- | --- |
+| GitHub | Reads failed runs and JUnit artifacts. Opens a quarantine PR for flaky tests. Posts one evidence comment on the branch PR. |
+| Linear | Opens a regression issue or a needs-triage issue. Never edits product code for those cases. |
+| Slack | Posts one digest with counts, labels, and links. |
+
+OpenAI is optional. When `--use-openai` is set, it only explains evidence the classifier already labeled.
+
+## Demo
+
+Two-minute demo: **[add the public video URL here]**
+
+Shot list used for the recording: [demo script](docs/demo-script.md).
+
+## How we tested reliability
+
+The check we care about most: a real regression must never be labeled `FLAKY`.
+
+- The pytest suite runs on every PR and on `main`, on Python 3.12 and 3.14.
+- A 15-case, hand-labeled classifier benchmark covers mixed reruns, always-fail cases, timeouts, missing evidence, and mixed signals. CI fails if any case is wrong or if any regression is labeled flaky. Current result: 15/15 correct, zero regressions labeled flaky.
+- A live fixture repo (`GreenTreeGaming/syft-testing`) had three known failures in one workflow: one flake, one checkout regression, one unclear environment failure. Syft labeled them `FLAKY`, `REGRESSION`, and `ESCALATE`. The quarantine PR skipped only the flake. The other two stayed failing.
+- The model output schema has no `classification` or `confidence` field, so a bad explanation cannot relabel a test.
+
+Longer writeup: [system and reliability brief](docs/system-reliability-brief.md).
 
 ## Setup
 
 Python 3.12 or newer is required.
 
 ```bash
-cd /Users/sarvajithkarun/Desktop/Projects/syft
+cd /path/to/syft
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
+```
+
+Copy the env example and fill in the keys you need. Unit tests do not need credentials.
+
+```bash
 cp .env.example .env
 ```
 
-Set `GITHUB_TOKEN` and `GITHUB_REPOSITORY=owner/repo` when using GitHub run discovery. Unit tests do not need credentials.
+Set `GITHUB_TOKEN` and `GITHUB_REPOSITORY=owner/repo` when using GitHub run discovery.
 
 ## Run an analysis
 
@@ -52,7 +103,7 @@ Do not copy `/path/to/fixture-repository` literally; replace it with a real chec
 ```bash
 .venv/bin/python -m syft \
   tests/test_checkout.py::test_checkout \
-  --repo /Users/sarvajithkarun/Desktop/Projects/syft-testing \
+  --repo /path/to/syft-testing \
   --current-commit f29ac136363632d73a16afc45576ab83af7978d2 \
   --last-green-commit 4deaeab237d31edd88ba473cb6b551fb74cc71d5 \
   --github-repository GreenTreeGaming/syft-testing \
@@ -104,11 +155,11 @@ export GITHUB_TOKEN="$(gh auth token)"
 export GITHUB_REPOSITORY="GreenTreeGaming/syft-testing"
 
 python -m syft poll \
-  --repo /Users/sarvajithkarun/Desktop/Projects/syft-testing \
+  --repo /path/to/syft-testing \
   --branch codex/regression-fixture \
   --green-branch main \
   --artifact-name pytest-junit \
-  --ground-truth /Users/sarvajithkarun/Desktop/Projects/syft-testing/eval/ground_truth.json
+  --ground-truth /path/to/syft-testing/eval/ground_truth.json
 ```
 
 The coordinator discovers the newest failed run, finds the prior successful run, downloads its JUnit artifact, analyzes every failed test from a detached checkout, writes full traces, and prints a compact `WorkflowAnalysis` JSON envelope. When `--ground-truth` is provided, the confusion matrix and regression safety metrics are printed to stderr.
@@ -121,7 +172,7 @@ Watch mode turns the same deterministic pipeline and action agent into a long-ru
 export GITHUB_TOKEN="$(gh auth token)"
 
 python -m syft watch \
-  --repo /Users/sarvajithkarun/Desktop/Projects/syft-testing \
+  --repo /path/to/syft-testing \
   --github-repository GreenTreeGaming/syft-testing \
   --branch codex/regression-fixture \
   --green-branch main \
