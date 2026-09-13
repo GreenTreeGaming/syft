@@ -14,6 +14,7 @@ Judge-facing material: [system and reliability brief](docs/system-reliability-br
 - pure, explainable classification rules that favor `ESCALATE` when evidence is missing
 - sanitized JSON traces with stable `analysis_id` values
 - evaluation metrics, including the safety-critical `REGRESSION -> FLAKY` count
+- an idempotent evidence summary posted directly on the failed branch's pull request
 
 The downstream action agent is included, but it cannot change the deterministic label or confidence. It uses an LLM only to explain already-classified evidence, then routes flaky tests to quarantine PRs, regressions to Linear issues, ambiguous results to human triage, and posts one Slack digest.
 
@@ -203,6 +204,7 @@ Routing is fixed:
 - `FLAKY` creates a stacked quarantine PR against the failed branch.
 - `REGRESSION` creates a Linear regression issue and never modifies code.
 - `ESCALATE` creates a Linear needs-triage issue.
+- One GitHub pull-request comment summarizes the evidence and links to those actions. Reprocessing updates the marked comment instead of creating another one; branches without an open PR are skipped safely.
 - One Slack digest summarizes the workflow and links to created actions.
 
 `.syft-agent-state.json` records successful action IDs so rerunning the same workflow does not duplicate actions. The GitHub branch and PR lookup provide an additional external idempotency check.

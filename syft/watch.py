@@ -18,6 +18,7 @@ from syft.agent.state import ActionLedger
 from syft.deterministic.coordinator import analyze_failed_workflow
 from syft.deterministic.github_runs import GitHubActionsClient
 from syft.integrations.github import GitHubQuarantineClient
+from syft.integrations.github_summary import GitHubPRSummaryClient
 from syft.integrations.linear import LinearClient
 from syft.integrations.slack import SlackWebhookClient
 from syft.models.analysis import WorkflowAnalysis
@@ -105,6 +106,7 @@ class WorkflowWatcher:
         trace_directory: Path | None = None,
         execute: bool = False,
         github_actions: GitHubQuarantineClient | None = None,
+        github_summary: GitHubPRSummaryClient | None = None,
         linear: LinearClient | None = None,
         slack: SlackWebhookClient | None = None,
         analyzer: Callable[..., WorkflowAnalysis] = analyze_failed_workflow,
@@ -123,6 +125,7 @@ class WorkflowWatcher:
         self.trace_directory = trace_directory
         self.execute = execute
         self.github_actions = github_actions
+        self.github_summary = github_summary
         self.linear = linear
         self.slack = slack
         self.analyzer = analyzer
@@ -161,6 +164,8 @@ class WorkflowWatcher:
             github=self.github_actions,
             linear=self.linear,
             slack=self.slack,
+            github_summary=self.github_summary,
+            publish_github_summary=True,
         )
         if self.execute:
             failures = [

@@ -27,6 +27,7 @@ from syft.eval.ground_truth import load_ground_truth
 from syft.eval.metrics import evaluate_predictions, format_report
 from syft.integrations import IntegrationError
 from syft.integrations.github import GitHubQuarantineClient
+from syft.integrations.github_summary import GitHubPRSummaryClient
 from syft.integrations.linear import LinearClient
 from syft.integrations.slack import SlackWebhookClient
 from syft.models.analysis import CIContext, WorkflowAnalysis
@@ -114,6 +115,7 @@ def _agent_main(argv: list[str]) -> int:
 
     openai = None
     github = None
+    github_summary = None
     linear = None
     slack = None
     try:
@@ -124,6 +126,10 @@ def _agent_main(argv: list[str]) -> int:
             explainer = openai
         if arguments.execute:
             github = GitHubQuarantineClient(
+                os.getenv("GITHUB_TOKEN", ""),
+                workflow.repository,
+            )
+            github_summary = GitHubPRSummaryClient(
                 os.getenv("GITHUB_TOKEN", ""),
                 workflow.repository,
             )
@@ -140,6 +146,8 @@ def _agent_main(argv: list[str]) -> int:
             github=github,
             linear=linear,
             slack=slack,
+            github_summary=github_summary,
+            publish_github_summary=True,
         )
     except (ExplanationError, IntegrationError, OSError, ValueError) as error:
         parser.error(str(error))
@@ -148,6 +156,8 @@ def _agent_main(argv: list[str]) -> int:
             openai.close()
         if github:
             github.close()
+        if github_summary:
+            github_summary.close()
         if linear:
             linear.close()
         if slack:
@@ -235,6 +245,7 @@ def _watch_main(argv: list[str]) -> int:
     github_discovery = None
     openai = None
     github_actions = None
+    github_summary = None
     linear = None
     slack = None
     try:
@@ -248,6 +259,10 @@ def _watch_main(argv: list[str]) -> int:
             explainer = openai
         if arguments.execute:
             github_actions = GitHubQuarantineClient(
+                os.getenv("GITHUB_TOKEN", ""),
+                github_discovery.repository,
+            )
+            github_summary = GitHubPRSummaryClient(
                 os.getenv("GITHUB_TOKEN", ""),
                 github_discovery.repository,
             )
@@ -271,6 +286,7 @@ def _watch_main(argv: list[str]) -> int:
             trace_directory=_relative_to_repo(repo, arguments.trace_dir),
             execute=arguments.execute,
             github_actions=github_actions,
+            github_summary=github_summary,
             linear=linear,
             slack=slack,
         )
@@ -302,6 +318,8 @@ def _watch_main(argv: list[str]) -> int:
             openai.close()
         if github_actions:
             github_actions.close()
+        if github_summary:
+            github_summary.close()
         if linear:
             linear.close()
         if slack:
