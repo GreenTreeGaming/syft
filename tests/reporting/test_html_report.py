@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from syft.agent.explainer import TemplateExplainer
-from syft.agent.models import ActionKind, ActionResult, ActionStatus, AgentRun, Explanation
+from syft.agent.models import ActionKind, ActionResult, ActionStatus, AgentRun, Explanation, Investigation, ToolCallRecord
 from syft.agent.orchestrator import run_agent
 from syft.agent.router import build_action_plans
 from syft.agent.state import ActionLedger
@@ -116,6 +116,40 @@ def test_escapes_external_strings_and_omits_secrets(workflow_analysis: WorkflowA
     assert "<script src" not in html
     assert "http://" not in html.split("<style>", 1)[1].split("</style>", 1)[0]
 
+
+def test_renders_investigation_tool_calls(workflow_analysis: WorkflowAnalysis) -> None:
+    plans = build_action_plans(workflow_analysis, TemplateExplainer())
+    agent_run = AgentRun(
+        workflow_analysis_id=workflow_analysis.workflow_analysis_id,
+        dry_run=True,
+        plans=plans,
+        results=[],
+        slack_digest="unused",
+        investigations=[
+            Investigation(
+                analysis_id=workflow_analysis.analyses[0].analysis_id,
+                test_node_id=workflow_analysis.analyses[0].test.node_id,
+                workflow_run_id=workflow_analysis.workflow_run_id,
+                turns=2,
+                tool_calls=[
+                    ToolCallRecord(
+                        name="read_file",
+                        arguments={"path": 'tests/<script>alert("xss")</script>.py'},
+                        ok=True,
+                        preview='<script>alert("preview")</script>',
+                    )
+                ],
+            )
+        ],
+    )
+    html = render_html_report(workflow_analysis, agent_run=agent_run)
+    assert 'data-tool-name="read_file"' in html
+    assert "read_file" in html
+    assert "<script>alert" not in html
+    assert "&lt;script&gt;" in html
+    assert "&lt;script&gt;alert(&quot;preview&quot;)&lt;/script&gt;" in html
+    assert html.count('data-testid="investigation"') == 1
+    assert html.count('data-testid="investigation-missing"') == 2
 
 def test_renders_classifications_and_rerun_counts(workflow_analysis: WorkflowAnalysis) -> None:
     html = render_html_report(workflow_analysis)

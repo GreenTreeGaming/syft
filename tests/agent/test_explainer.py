@@ -121,6 +121,11 @@ def test_openai_explainer_reads_file_through_tool_loop(
     assert "current-sha:app/checkout.py" in show.call_args.args[0]
     assert provider.tool_trace[0]["name"] == "read_file"
     assert provider.tool_trace[0]["ok"] is True
+    assert len(provider.investigations) == 1
+    recorded = provider.investigations[0]
+    assert recorded.tool_calls[0].name == "read_file"
+    assert recorded.turns == 2
+    assert recorded.used_template_fallback is False
 
 
 def test_turn_cap_falls_back_to_template(
@@ -151,6 +156,9 @@ def test_turn_cap_falls_back_to_template(
     assert result == expected
     assert "Flaky behavior detected" in result.headline
     assert len(provider.tool_trace) == 3
+    assert provider.investigations[0].used_template_fallback is True
+    assert provider.investigations[0].turns == 3
+    assert len(provider.investigations[0].tool_calls) == 3
 
 
 def test_escalate_does_not_call_openai(workflow_analysis: WorkflowAnalysis) -> None:
@@ -164,6 +172,8 @@ def test_escalate_does_not_call_openai(workflow_analysis: WorkflowAnalysis) -> N
         provider.close()
     assert result == TemplateExplainer().explain(workflow_analysis.analyses[2])
     assert provider.tool_trace == []
+    assert provider.investigations[0].tool_calls == []
+    assert provider.investigations[0].turns == 0
 
 
 def test_search_history_tool_result_is_sent_back(
@@ -198,3 +208,109 @@ def test_search_history_tool_result_is_sent_back(
     assert "FLAKY" in follow_up
     assert "workflow_run_id" in follow_up
     assert "42" in follow_up
+
+
+def test_from_environment_keeps_the_passed_history_store(
+    workflow_analysis: WorkflowAnalysis, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("SYFT_HISTORY_PATH", str(tmp_path / "env-history.sqlite"))
+    store = HistoryStore(tmp_path / "cli-history.sqlite")
+    store.record_workflow(workflow_analysis)
+    provider = OpenAIExplainer.from_environment(
+        repository="owner/repo",
+        history_store=store,
+    )
+    try:
+        assert provider.history_store is store
+        assert provider._owns_history is False
+        assert provider.max_turns == 5
+        assert provider.max_tool_calls == 8
+        assert provider.investigation_timeout_seconds == 60.0
+    finally:
+        provider.close()
+    leftover = store.recent_history("owner/repo", "tests/test_flaky.py::test_flaky")
+    store.close()
+    assert leftover[0].workflow_run_id == 42
+
+
+def test_tool_call_cap_falls_back_after_eight_calls(
+    workflow_analysis: WorkflowAnalysis, mocker, tmp_path: Path
+) -> None:
+    mocker.patch(
+        "syft.agent.tools.subprocess.run",
+        return_value=subprocess.CompletedProcess([], 0, "source", ""),
+    )
+    requests = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests["count"] += 1
+        return httpx.Response(
+            200,
+            json={
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call_{index}",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "tests/test_flaky.py"}),
+                    }
+                    for index in range(8)
+                ]
+            },
+        )
+
+    provider = OpenAIExplainer(
+        "test-key",
+        repo_path=tmp_path,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = provider.explain(workflow_analysis.analyses[0])
+    finally:
+        provider.close()
+    assert "Flaky behavior detected" in result.headline
+    assert requests["count"] == 1
+    assert len(provider.tool_trace) == 8
+    assert provider.investigations[0].hit_tool_cap is True
+    assert provider.investigations[0].used_template_fallback is True
+
+
+def test_investigation_timeout_falls_back_without_reclassifying(
+    workflow_analysis: WorkflowAnalysis, mocker, tmp_path: Path
+) -> None:
+    clock = {"value": 0.0}
+
+    def monotonic() -> float:
+        current = clock["value"]
+        if current == 0.0:
+            clock["value"] = 0.1
+        else:
+            clock["value"] = 61.0
+        return current
+
+    mocker.patch("syft.agent.explainer.time.monotonic", side_effect=monotonic)
+    mocker.patch(
+        "syft.agent.tools.subprocess.run",
+        return_value=subprocess.CompletedProcess([], 0, "source", ""),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_function_call("read_file", {"path": "tests/test_flaky.py"}),
+        )
+
+    provider = OpenAIExplainer(
+        "test-key",
+        repo_path=tmp_path,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = provider.explain(workflow_analysis.analyses[0])
+    finally:
+        provider.close()
+    assert result.headline.startswith("Flaky behavior detected")
+    assert provider.investigations[0].timed_out is True
+    assert provider.investigations[0].used_template_fallback is True
+    assert len(provider.tool_trace) == 1

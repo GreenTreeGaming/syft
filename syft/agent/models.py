@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -63,6 +64,28 @@ class ActionResult(AgentModel):
     detail: str
 
 
+class ToolCallRecord(AgentModel):
+    """One allowlisted tool invocation during explanation."""
+
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    ok: bool
+    preview: str = ""
+
+
+class Investigation(AgentModel):
+    """Persisted evidence that the explainer chose and invoked tools."""
+
+    analysis_id: str
+    test_node_id: str
+    workflow_run_id: int | None = None
+    turns: int = Field(ge=0)
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    timed_out: bool = False
+    hit_tool_cap: bool = False
+    used_template_fallback: bool = False
+
+
 class AgentRun(AgentModel):
     schema_version: str = "1.0"
     workflow_analysis_id: str
@@ -73,3 +96,4 @@ class AgentRun(AgentModel):
     results: list[ActionResult]
     slack_digest: str
     history: WorkflowHistorySummary | None = None
+    investigations: list[Investigation] = Field(default_factory=list)

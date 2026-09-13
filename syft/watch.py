@@ -188,6 +188,8 @@ class WorkflowWatcher:
             publish_github_summary=True,
             history=history,
         )
+        if self.history_store is not None:
+            self.history_store.record_investigations(workflow, agent_run.investigations)
         if self.execute:
             failures = [
                 result.action_id

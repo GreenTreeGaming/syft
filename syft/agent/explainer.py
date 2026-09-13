@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
 
-from syft.agent.models import Explanation
+from syft.agent.models import Explanation, Investigation, ToolCallRecord
 from syft.agent.tools import TOOL_SCHEMAS, allowed_paths, execute_tool
 from syft.history.store import HistoryStore
 from syft.models.analysis import Classification, TestAnalysis
@@ -18,8 +19,9 @@ _INSTRUCTIONS = (
     "You explain a deterministic CI classification. The classification and confidence in the "
     "input are immutable. Never reclassify, second-guess, or propose a different label. "
     "You may call the provided tools to inspect allowlisted files at the failing commit or "
-    "prior Syft history. Ground every statement in the supplied evidence. Keep the hypothesis "
-    "explicitly tentative. When you are done investigating, return the structured explanation."
+    "prior Syft history. Batch tool calls when you can, then stop and return the structured "
+    "explanation. Ground every statement in the supplied evidence. Keep the hypothesis "
+    "explicitly tentative."
 )
 
 
@@ -38,7 +40,18 @@ class TemplateExplainer:
 
     model_name = None
 
+    def __init__(self) -> None:
+        self.investigations: list[Investigation] = []
+
     def explain(self, analysis: TestAnalysis) -> Explanation:
+        self.investigations.append(
+            Investigation(
+                analysis_id=analysis.analysis_id,
+                test_node_id=analysis.test.node_id,
+                turns=0,
+                tool_calls=[],
+            )
+        )
         evidence = [
             analysis.reason,
             (
@@ -90,7 +103,9 @@ class OpenAIExplainer:
         repo_path: Path | None = None,
         repository: str | None = None,
         history_store: HistoryStore | None = None,
-        max_turns: int = 3,
+        max_turns: int = 5,
+        max_tool_calls: int = 8,
+        investigation_timeout_seconds: float = 60.0,
         transport: httpx.BaseTransport | None = None,
         owns_history: bool = False,
     ) -> None:
@@ -98,12 +113,19 @@ class OpenAIExplainer:
             raise ExplanationError("OPENAI_API_KEY is required when --use-openai is enabled")
         if max_turns < 1:
             raise ExplanationError("max_turns must be >= 1")
+        if max_tool_calls < 1:
+            raise ExplanationError("max_tool_calls must be >= 1")
+        if investigation_timeout_seconds <= 0:
+            raise ExplanationError("investigation_timeout_seconds must be > 0")
         self.model_name = model
         self.repo_path = repo_path.resolve() if repo_path else None
         self.repository = repository
         self.history_store = history_store
         self.max_turns = max_turns
+        self.max_tool_calls = max_tool_calls
+        self.investigation_timeout_seconds = investigation_timeout_seconds
         self.tool_trace: list[dict[str, Any]] = []
+        self.investigations: list[Investigation] = []
         self._owns_history = owns_history
         self._client = httpx.Client(
             base_url="https://api.openai.com/v1",
@@ -118,16 +140,21 @@ class OpenAIExplainer:
         repo_path: Path | None = None,
         *,
         repository: str | None = None,
+        history_store: HistoryStore | None = None,
     ) -> "OpenAIExplainer":
-        history_path = os.getenv("SYFT_HISTORY_PATH")
-        history_store = HistoryStore(Path(history_path)) if history_path else None
+        owns_history = False
+        if history_store is None:
+            history_path = os.getenv("SYFT_HISTORY_PATH")
+            if history_path:
+                history_store = HistoryStore(Path(history_path))
+                owns_history = True
         return cls(
             os.getenv("OPENAI_API_KEY", ""),
             os.getenv("OPENAI_MODEL", "gpt-5.4-mini"),
             repo_path=repo_path,
             repository=repository,
             history_store=history_store,
-            owns_history=history_store is not None,
+            owns_history=owns_history,
         )
 
     def close(self) -> None:
@@ -138,13 +165,48 @@ class OpenAIExplainer:
     def explain(self, analysis: TestAnalysis) -> Explanation:
         self.tool_trace = []
         if analysis.classification is Classification.ESCALATE:
-            return TemplateExplainer().explain(analysis)
+            explanation = TemplateExplainer().explain(analysis)
+            self._record_investigation(analysis, turns=0, fallback=False, timed_out=False, hit_tool_cap=False)
+            return explanation
         try:
-            return self._explain_with_tools(analysis)
+            explanation, turns, timed_out, hit_tool_cap, fallback = self._explain_with_tools(analysis)
         except ExplanationError:
-            return TemplateExplainer().explain(analysis)
+            explanation = TemplateExplainer().explain(analysis)
+            self._record_investigation(analysis, turns=0, fallback=True, timed_out=False, hit_tool_cap=False)
+            return explanation
+        self._record_investigation(
+            analysis,
+            turns=turns,
+            fallback=fallback,
+            timed_out=timed_out,
+            hit_tool_cap=hit_tool_cap,
+        )
+        return explanation
 
-    def _explain_with_tools(self, analysis: TestAnalysis) -> Explanation:
+    def _record_investigation(
+        self,
+        analysis: TestAnalysis,
+        *,
+        turns: int,
+        fallback: bool,
+        timed_out: bool,
+        hit_tool_cap: bool,
+    ) -> None:
+        run_id = analysis.ci_context.workflow_run_id if analysis.ci_context else None
+        self.investigations.append(
+            Investigation(
+                analysis_id=analysis.analysis_id,
+                test_node_id=analysis.test.node_id,
+                workflow_run_id=run_id,
+                turns=turns,
+                tool_calls=[ToolCallRecord.model_validate(item) for item in self.tool_trace],
+                timed_out=timed_out,
+                hit_tool_cap=hit_tool_cap,
+                used_template_fallback=fallback,
+            )
+        )
+
+    def _explain_with_tools(self, analysis: TestAnalysis) -> tuple[Explanation, int, bool, bool, bool]:
         conversation: list[Any] = [
             {
                 "role": "user",
@@ -158,7 +220,16 @@ class OpenAIExplainer:
             }
         ]
         schema = Explanation.model_json_schema()
+        deadline = time.monotonic() + self.investigation_timeout_seconds
+        timed_out = False
+        hit_tool_cap = False
+        turns = 0
         for _turn in range(self.max_turns):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            turns += 1
             payload = {
                 "model": self.model_name,
                 "store": False,
@@ -178,13 +249,23 @@ class OpenAIExplainer:
                 "metadata": {"analysis_id": analysis.analysis_id},
             }
             try:
-                response = self._client.post("/responses", json=payload)
+                response = self._client.post("/responses", json=payload, timeout=min(60.0, remaining))
                 response.raise_for_status()
                 result = response.json()
-            except (httpx.HTTPError, ValueError) as error:
+            except (httpx.TimeoutException, httpx.HTTPError, ValueError) as error:
+                if isinstance(error, httpx.TimeoutException) or time.monotonic() >= deadline:
+                    timed_out = True
+                    break
                 raise ExplanationError(f"OpenAI explanation failed: {error}") from error
             calls = _function_calls(result)
             if calls:
+                remaining_slots = self.max_tool_calls - len(self.tool_trace)
+                if remaining_slots <= 0:
+                    hit_tool_cap = True
+                    break
+                if len(calls) > remaining_slots:
+                    calls = calls[:remaining_slots]
+                    hit_tool_cap = True
                 for item in result.get("output", []):
                     if isinstance(item, dict):
                         conversation.append(item)
@@ -201,7 +282,16 @@ class OpenAIExplainer:
                         {
                             "name": call["name"],
                             "arguments": call["arguments"],
-                            "ok": not output.startswith(("Path is not", "Unknown tool", "git failed:")),
+                            "ok": not output.startswith(
+                                (
+                                    "Path is not",
+                                    "Unknown tool",
+                                    "git failed:",
+                                    "history store not configured",
+                                    "repository not configured",
+                                    "repository path not configured",
+                                )
+                            ),
                             "preview": output[:200],
                         }
                     )
@@ -212,12 +302,16 @@ class OpenAIExplainer:
                             "output": output,
                         }
                     )
+                if hit_tool_cap or len(self.tool_trace) >= self.max_tool_calls:
+                    hit_tool_cap = True
+                    break
                 continue
             try:
-                return Explanation.model_validate_json(_response_output_text(result))
+                explanation = Explanation.model_validate_json(_response_output_text(result))
             except (ExplanationError, ValueError) as error:
                 raise ExplanationError(f"OpenAI explanation failed: {error}") from error
-        return TemplateExplainer().explain(analysis)
+            return explanation, turns, False, False, False
+        return TemplateExplainer().explain(analysis), turns, timed_out, hit_tool_cap, True
 
 
 def _function_calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
