@@ -1,0 +1,107 @@
+[
+  {
+    "test": "mixed_even_no_change",
+    "outcomes": ["FAILED", "PASSED", "FAILED", "PASSED", "FAILED"],
+    "related_code_changed": false,
+    "failed_on_previous_commit": null,
+    "expected": "FLAKY"
+  },
+  {
+    "test": "rare_pass_no_change",
+    "outcomes": ["FAILED", "FAILED", "PASSED", "FAILED", "FAILED"],
+    "related_code_changed": false,
+    "failed_on_previous_commit": null,
+    "expected": "FLAKY"
+  },
+  {
+    "test": "rare_failure_no_change",
+    "outcomes": ["PASSED", "PASSED", "FAILED", "PASSED", "PASSED"],
+    "related_code_changed": false,
+    "failed_on_previous_commit": null,
+    "expected": "FLAKY"
+  },
+  {
+    "test": "minimal_mixed_no_change",
+    "outcomes": ["FAILED", "PASSED"],
+    "related_code_changed": false,
+    "failed_on_previous_commit": null,
+    "expected": "FLAKY"
+  },
+  {
+    "test": "persistent_new_related_change",
+    "outcomes": ["FAILED", "FAILED", "FAILED", "FAILED", "FAILED"],
+    "related_code_changed": true,
+    "failed_on_previous_commit": false,
+    "expected": "REGRESSION"
+  },
+  {
+    "test": "persistent_related_change_prior_unknown",
+    "outcomes": ["FAILED", "FAILED", "FAILED"],
+    "related_code_changed": true,
+    "failed_on_previous_commit": null,
+    "expected": "REGRESSION"
+  },
+  {
+    "test": "persistent_change_but_prior_failed",
+    "outcomes": ["FAILED", "FAILED", "FAILED", "FAILED", "FAILED"],
+    "related_code_changed": true,
+    "failed_on_previous_commit": true,
+    "expected": "ESCALATE"
+  },
+  {
+    "test": "mixed_with_related_change",
+    "outcomes": ["FAILED", "PASSED", "FAILED", "PASSED", "FAILED"],
+    "related_code_changed": true,
+    "failed_on_previous_commit": false,
+    "expected": "ESCALATE"
+  },
+  {
+    "test": "persistent_without_related_change",
+    "outcomes": ["FAILED", "FAILED", "FAILED", "FAILED", "FAILED"],
+    "related_code_changed": false,
+    "failed_on_previous_commit": false,
+    "expected": "ESCALATE"
+  },
+  {
+    "test": "all_reruns_pass",
+    "outcomes": ["PASSED", "PASSED", "PASSED", "PASSED", "PASSED"],
+    "related_code_changed": false,
+    "failed_on_previous_commit": null,
+    "expected": "ESCALATE"
+  },
+  {
+    "test": "timeout_present",
+    "outcomes": ["FAILED", "TIMED_OUT", "FAILED"],
+    "related_code_changed": false,
+    "failed_on_previous_commit": null,
+    "expected": "ESCALATE"
+  },
+  {
+    "test": "no_rerun_evidence",
+    "outcomes": [],
+    "related_code_changed": false,
+    "failed_on_previous_commit": null,
+    "expected": "ESCALATE"
+  },
+  {
+    "test": "missing_related_code_evidence",
+    "outcomes": ["FAILED", "FAILED", "FAILED"],
+    "related_code_changed": null,
+    "failed_on_previous_commit": false,
+    "expected": "ESCALATE"
+  },
+  {
+    "test": "mixed_missing_related_code_evidence",
+    "outcomes": ["PASSED", "FAILED", "PASSED"],
+    "related_code_changed": null,
+    "failed_on_previous_commit": null,
+    "expected": "ESCALATE"
+  },
+  {
+    "test": "all_pass_despite_related_change",
+    "outcomes": ["PASSED", "PASSED", "PASSED"],
+    "related_code_changed": true,
+    "failed_on_previous_commit": false,
+    "expected": "ESCALATE"
+  }
+]
