@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,6 +82,11 @@ def test_processes_once_writes_outputs_and_deduplicates(
     assert first.analysis_path.exists()
     assert first.agent_run_path.exists()
     assert "reruns" in first.analysis_path.read_text(encoding="utf-8")
+    agent_payload = json.loads(first.agent_run_path.read_text(encoding="utf-8"))
+    assert any(
+        item["kind"] == "GITHUB_PR_SUMMARY" and item["status"] == "PLANNED"
+        for item in agent_payload["results"]
+    )
     assert second.status is WatchStatus.ALREADY_PROCESSED
     assert analyzer.call_count == 1
     _, _, passed_run = analyzer.call_args.args

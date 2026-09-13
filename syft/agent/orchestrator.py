@@ -10,6 +10,7 @@ from syft.agent.router import build_action_plans
 from syft.agent.state import ActionLedger
 from syft.integrations import IntegrationError
 from syft.integrations.github import GitHubQuarantineClient
+from syft.integrations.github_summary import GitHubPRSummaryClient, summary_action_id
 from syft.integrations.linear import LinearClient
 from syft.integrations.slack import SlackWebhookClient
 from syft.models.analysis import WorkflowAnalysis
@@ -24,6 +25,8 @@ def run_agent(
     github: GitHubQuarantineClient | None = None,
     linear: LinearClient | None = None,
     slack: SlackWebhookClient | None = None,
+    github_summary: GitHubPRSummaryClient | None = None,
+    publish_github_summary: bool = False,
 ) -> AgentRun:
     plans = build_action_plans(workflow, explainer)
     results: list[ActionResult] = []
@@ -72,6 +75,34 @@ def run_agent(
             )
         ledger.record(result)
         results.append(result)
+
+    if publish_github_summary:
+        summary_id = summary_action_id(workflow.workflow_analysis_id)
+        if dry_run:
+            summary_result = ActionResult(
+                action_id=summary_id,
+                kind=ActionKind.GITHUB_PR_SUMMARY,
+                status=ActionStatus.PLANNED,
+                detail="Dry run: would create or update one GitHub pull-request summary.",
+            )
+        elif github_summary is None:
+            summary_result = ActionResult(
+                action_id=summary_id,
+                kind=ActionKind.GITHUB_PR_SUMMARY,
+                status=ActionStatus.FAILED,
+                detail="GitHub PR-summary client is not configured",
+            )
+        else:
+            try:
+                summary_result = github_summary.upsert_summary(workflow, plans, list(results))
+            except IntegrationError as error:
+                summary_result = ActionResult(
+                    action_id=summary_id,
+                    kind=ActionKind.GITHUB_PR_SUMMARY,
+                    status=ActionStatus.FAILED,
+                    detail=str(error),
+                )
+        results.append(summary_result)
 
     digest = build_slack_digest(workflow, results)
     digest_id = _digest_action_id(workflow.workflow_analysis_id)

@@ -19,6 +19,7 @@ class ActionKind(str, Enum):
     REGRESSION_TICKET = "REGRESSION_TICKET"
     TRIAGE_TICKET = "TRIAGE_TICKET"
     SLACK_DIGEST = "SLACK_DIGEST"
+    GITHUB_PR_SUMMARY = "GITHUB_PR_SUMMARY"
 
 
 class ActionStatus(str, Enum):
@@ -27,6 +28,7 @@ class ActionStatus(str, Enum):
     ALREADY_EXISTS = "ALREADY_EXISTS"
     FAILED = "FAILED"
     SKIPPED = "SKIPPED"
+    UPDATED = "UPDATED"
 
 
 class Explanation(AgentModel):
@@ -69,4 +71,3 @@ class AgentRun(AgentModel):
     plans: list[ActionPlan]
     results: list[ActionResult]
     slack_digest: str
-
