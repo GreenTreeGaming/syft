@@ -30,6 +30,7 @@ from syft.integrations.github import GitHubQuarantineClient
 from syft.integrations.linear import LinearClient
 from syft.integrations.slack import SlackWebhookClient
 from syft.models.analysis import CIContext, WorkflowAnalysis
+from syft.watch import ProcessedRunLedger, WatchError, WorkflowWatcher, watch_forever
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
         return _agent_main(arguments[1:])
     if arguments[:1] == ["poll"]:
         return _poll_main(arguments[1:])
+    if arguments[:1] == ["watch"]:
+        return _watch_main(arguments[1:])
     if arguments[:1] == ["analyze"]:
         arguments = arguments[1:]
     return _analyze_main(arguments)
@@ -100,7 +103,11 @@ def _agent_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Explain and act on a Syft WorkflowAnalysis")
     parser.add_argument("--input", required=True, type=Path, help="compact WorkflowAnalysis JSON file")
     parser.add_argument("--repo", type=Path, help="local tested repo used for exact-commit source context")
-    parser.add_argument("--execute", action="store_true", help="perform real GitHub, Linear, and Slack writes")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="perform real GitHub, Linear, and Slack writes",
+    )
     parser.add_argument("--use-openai", action="store_true", help="generate explanations with OpenAI")
     parser.add_argument("--state-file", type=Path, default=Path(".syft-agent-state.json"))
     arguments = parser.parse_args(argv)
@@ -191,6 +198,114 @@ def _poll_main(argv: list[str]) -> int:
         parser.error(str(error))
     print(result.consumer_dump_json(indent=2))
     return 0
+
+
+def _watch_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Continuously process new failed GitHub Actions runs")
+    parser.add_argument("--repo", required=True, type=Path, help="local clone of the repository under test")
+    parser.add_argument("--github-repository", default=os.getenv("GITHUB_REPOSITORY"))
+    parser.add_argument("--branch", default=os.getenv("SYFT_BRANCH", "main"))
+    parser.add_argument("--green-branch", default="main")
+    parser.add_argument("--artifact-name", default=os.getenv("SYFT_JUNIT_ARTIFACT"))
+    parser.add_argument("--attempts", type=int, default=5)
+    parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--interval", type=float, default=60.0, help="seconds between GitHub polls")
+    parser.add_argument("--once", action="store_true", help="run one cycle and exit")
+    parser.add_argument("--use-openai", action="store_true", help="generate explanations with OpenAI")
+    execution = parser.add_mutually_exclusive_group()
+    execution.add_argument(
+        "--execute",
+        action="store_true",
+        help="perform real GitHub, Linear, and Slack writes",
+    )
+    execution.add_argument(
+        "--dry-run",
+        action="store_false",
+        dest="execute",
+        help="plan actions without external writes",
+    )
+    parser.set_defaults(execute=False)
+    parser.add_argument("--watch-state-file", type=Path, default=Path(".syft/watch-state.json"))
+    parser.add_argument("--action-state-file", type=Path, default=Path(".syft/agent-state.json"))
+    parser.add_argument("--output-dir", type=Path, default=Path(".syft/runs"))
+    parser.add_argument("--trace-dir", type=Path, default=Path("traces"))
+    arguments = parser.parse_args(argv)
+
+    repo = _validated_repo(parser, arguments.repo)
+    github_discovery = None
+    openai = None
+    github_actions = None
+    linear = None
+    slack = None
+    try:
+        github_discovery = GitHubActionsClient(
+            os.getenv("GITHUB_TOKEN", ""),
+            arguments.github_repository or "",
+        )
+        explainer = TemplateExplainer()
+        if arguments.use_openai:
+            openai = OpenAIExplainer.from_environment(repo)
+            explainer = openai
+        if arguments.execute:
+            github_actions = GitHubQuarantineClient(
+                os.getenv("GITHUB_TOKEN", ""),
+                github_discovery.repository,
+            )
+            linear = LinearClient(
+                os.getenv("LINEAR_API_KEY", ""),
+                os.getenv("LINEAR_TEAM_ID", ""),
+            )
+            slack = SlackWebhookClient(os.getenv("SLACK_WEBHOOK_URL", ""))
+        watcher = WorkflowWatcher(
+            repo_path=repo,
+            github=github_discovery,
+            explainer=explainer,
+            action_ledger=ActionLedger(arguments.action_state_file),
+            run_ledger=ProcessedRunLedger(arguments.watch_state_file),
+            output_directory=arguments.output_dir,
+            branch=arguments.branch,
+            green_branch=arguments.green_branch,
+            artifact_name=arguments.artifact_name,
+            attempts=arguments.attempts,
+            timeout_seconds=arguments.timeout,
+            trace_directory=_relative_to_repo(repo, arguments.trace_dir),
+            execute=arguments.execute,
+            github_actions=github_actions,
+            linear=linear,
+            slack=slack,
+        )
+        return watch_forever(
+            watcher,
+            interval_seconds=arguments.interval,
+            once=arguments.once,
+        )
+    except KeyboardInterrupt:
+        print("Syft watch stopped.", file=sys.stderr)
+        return 130
+    except (
+        ExplanationError,
+        GitAnalysisError,
+        GitHubAPIError,
+        GitHubConfigurationError,
+        IntegrationError,
+        JUnitParseError,
+        OSError,
+        RerunError,
+        ValueError,
+        WatchError,
+    ) as error:
+        parser.error(str(error))
+    finally:
+        if github_discovery:
+            github_discovery.close()
+        if openai:
+            openai.close()
+        if github_actions:
+            github_actions.close()
+        if linear:
+            linear.close()
+        if slack:
+            slack.close()
 
 
 def _validated_repo(parser: argparse.ArgumentParser, repo: Path) -> Path:

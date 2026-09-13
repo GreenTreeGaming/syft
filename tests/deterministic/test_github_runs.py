@@ -28,6 +28,20 @@ def test_latest_failed_run_uses_github_api() -> None:
         client.close()
 
 
+def test_latest_failed_run_or_none_handles_green_branch() -> None:
+    client = GitHubActionsClient(
+        "token",
+        "owner/repo",
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, json={"workflow_runs": []})
+        ),
+    )
+    try:
+        assert client.latest_failed_run_or_none("main") is None
+    finally:
+        client.close()
+
+
 def test_selects_success_before_failure() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
