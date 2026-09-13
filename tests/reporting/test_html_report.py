@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from syft.agent.explainer import TemplateExplainer
 from syft.agent.models import ActionKind, ActionResult, ActionStatus, AgentRun, Explanation
 from syft.agent.orchestrator import run_agent
@@ -159,7 +161,6 @@ def test_confusion_matrix_and_false_negatives(workflow_analysis: WorkflowAnalysi
         GroundTruthCase(test="tests/test_flaky.py::test_flaky", expected=Classification.FLAKY),
         GroundTruthCase(test="tests/test_checkout.py::test_checkout", expected=Classification.REGRESSION),
         GroundTruthCase(test="tests/test_ambiguous.py::test_ambiguous", expected=Classification.FLAKY),
-        GroundTruthCase(test="tests/unseen.py::test_unseen", expected=Classification.REGRESSION),
     ]
     html = render_html_report(workflow_analysis, ground_truth=cases)
     assert 'data-testid="confusion"' in html
@@ -168,6 +169,39 @@ def test_confusion_matrix_and_false_negatives(workflow_analysis: WorkflowAnalysi
     assert 'data-expected="FLAKY" data-predicted="ESCALATE" data-diagonal="false">1</td>' in html
     fn_card = html.split('data-testid="metric-false-negatives"', 1)[1].split("</article>", 1)[0]
     assert ">0</div>" in fn_card
+    assert "Accuracy 66.7%" in html
+
+
+def test_incomplete_ground_truth_cannot_inflate_accuracy(workflow_analysis: WorkflowAnalysis) -> None:
+    cases = [
+        GroundTruthCase(test="tests/test_flaky.py::test_flaky", expected=Classification.FLAKY),
+        GroundTruthCase(test="tests/test_checkout.py::test_checkout", expected=Classification.REGRESSION),
+        GroundTruthCase(test="tests/test_ambiguous.py::test_ambiguous", expected=Classification.ESCALATE),
+        GroundTruthCase(test="tests/unseen.py::test_unseen", expected=Classification.REGRESSION),
+        GroundTruthCase(test="tests/also_missing.py::test_gone", expected=Classification.FLAKY),
+    ]
+    with pytest.raises(ValueError, match="tests/unseen.py::test_unseen") as caught:
+        render_html_report(workflow_analysis, ground_truth=cases)
+    message = str(caught.value)
+    assert "Missing predictions for ground-truth tests:" in message
+    assert "tests/also_missing.py::test_gone" in message
+    assert "Accuracy 100.0%" not in message
+
+
+def test_agent_run_must_match_workflow_analysis_id(
+    workflow_analysis: WorkflowAnalysis,
+    tmp_path: Path,
+) -> None:
+    agent_run = _executed_run(workflow_analysis, tmp_path).model_copy(
+        update={"workflow_analysis_id": "wa_other_run"}
+    )
+    with pytest.raises(ValueError, match="wa_other_run") as caught:
+        render_html_report(workflow_analysis, agent_run=agent_run)
+    assert workflow_analysis.workflow_analysis_id in str(caught.value)
+    output = tmp_path / "should-not-exist.html"
+    with pytest.raises(ValueError, match="does not match analysis"):
+        write_html_report(output, workflow_analysis, agent_run=agent_run)
+    assert not output.exists()
 
 
 def test_regression_false_negative_card(workflow_analysis: WorkflowAnalysis) -> None:

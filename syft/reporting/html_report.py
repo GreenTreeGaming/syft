@@ -203,6 +203,7 @@ def render_html_report(
 ) -> str:
     """Return a self-contained HTML document. Never embeds rerun output or secrets."""
 
+    _validate_report_inputs(workflow, agent_run=agent_run, ground_truth=ground_truth)
     metrics = _metrics(workflow, ground_truth)
     false_negatives = html_escape(metrics.regression_false_negatives if metrics else "n/a")
     title = html_escape(f"{workflow.repository} — Syft CI triage")
@@ -232,12 +233,35 @@ def write_html_report(
     agent_run: AgentRun | None = None,
     ground_truth: list[GroundTruthCase] | None = None,
 ) -> Path:
+    _validate_report_inputs(workflow, agent_run=agent_run, ground_truth=ground_truth)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         render_html_report(workflow, agent_run=agent_run, ground_truth=ground_truth),
         encoding="utf-8",
     )
     return output
+
+
+def _validate_report_inputs(
+    workflow: WorkflowAnalysis,
+    *,
+    agent_run: AgentRun | None,
+    ground_truth: list[GroundTruthCase] | None,
+) -> None:
+    if agent_run is not None and agent_run.workflow_analysis_id != workflow.workflow_analysis_id:
+        raise ValueError(
+            "Agent run workflow_analysis_id "
+            f"{agent_run.workflow_analysis_id!r} does not match analysis "
+            f"{workflow.workflow_analysis_id!r}"
+        )
+    if not ground_truth:
+        return
+    predictions = {item.test.node_id for item in workflow.analyses}
+    missing = [case.test for case in ground_truth if case.test not in predictions]
+    if missing:
+        raise ValueError(
+            "Missing predictions for ground-truth tests: " + ", ".join(missing)
+        )
 
 
 def _metrics(
@@ -247,10 +271,7 @@ def _metrics(
     if not ground_truth:
         return None
     predictions = {item.test.node_id: item.classification for item in workflow.analyses}
-    comparable = [case for case in ground_truth if case.test in predictions]
-    if not comparable:
-        return None
-    return evaluate_predictions(comparable, predictions)
+    return evaluate_predictions(ground_truth, predictions)
 
 
 def _render_header(workflow: WorkflowAnalysis) -> str:
