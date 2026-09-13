@@ -52,7 +52,7 @@ Syft connects to three apps:
 
 ## Demo
 
-Two-minute demo: **[[add the public video URL here]](https://youtu.be/vsZHP6MPt4I)**
+Two-minute demo: **[[Demo]](https://youtu.be/vsZHP6MPt4I)**
 
 ## How we tested reliability
 
