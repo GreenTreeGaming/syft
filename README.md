@@ -109,6 +109,44 @@ python -m syft poll \
 
 The coordinator discovers the newest failed run, finds the prior successful run, downloads its JUnit artifact, analyzes every failed test from a detached checkout, writes full traces, and prints a compact `WorkflowAnalysis` JSON envelope. When `--ground-truth` is provided, the confusion matrix and regression safety metrics are printed to stderr.
 
+## Watch for new CI failures
+
+Watch mode turns the same deterministic pipeline and action agent into a long-running worker:
+
+```bash
+export GITHUB_TOKEN="$(gh auth token)"
+
+python -m syft watch \
+  --repo /Users/sarvajithkarun/Desktop/Projects/syft-testing \
+  --github-repository GreenTreeGaming/syft-testing \
+  --branch codex/regression-fixture \
+  --green-branch main \
+  --artifact-name pytest-junit \
+  --interval 60 \
+  --dry-run
+```
+
+Use `--once` for one scheduler-friendly cycle. Dry runs and real executions have separate processed-run records, so a rehearsal never suppresses a later `--execute` run. Successful cycles save `analysis.json` and `agent-run.json` beneath `.syft/runs/<workflow-run-id>/`; these are the zero-secret inputs for the standalone HTML reporter. `.syft/watch-state.json` prevents repeat processing, while the existing action ledger prevents duplicate GitHub, Linear, and Slack writes after partial retries.
+
+To run the complete worker with real actions and optional OpenAI explanations:
+
+```bash
+export OPENAI_API_KEY="..."
+export LINEAR_API_KEY="..."
+export LINEAR_TEAM_ID="..."
+export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+
+python -m syft watch \
+  --repo /path/to/tested/repository \
+  --github-repository owner/repo \
+  --branch main \
+  --artifact-name pytest-junit \
+  --use-openai \
+  --execute
+```
+
+If a cycle hits a temporary API or integration failure, watch mode logs a credential-safe error and retries on the next interval. A run is marked processed only after its analysis, actions, and saved JSON all complete. Press `Ctrl-C` to stop the worker cleanly.
+
 ## Run tests
 
 ```bash

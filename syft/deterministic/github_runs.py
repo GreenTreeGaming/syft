@@ -80,10 +80,16 @@ class GitHubActionsClient:
         self._client.close()
 
     def latest_failed_run(self, branch: str = "main") -> GitHubRun:
-        runs = self._list_runs(branch=branch, status="failure")
-        if not runs:
+        run = self.latest_failed_run_or_none(branch)
+        if run is None:
             raise GitHubAPIError(f"No failed GitHub Actions run found for branch {branch!r}")
-        return runs[0]
+        return run
+
+    def latest_failed_run_or_none(self, branch: str = "main") -> GitHubRun | None:
+        """Return the newest failed run, or ``None`` when the branch is green."""
+
+        runs = self._list_runs(branch=branch, status="failure")
+        return runs[0] if runs else None
 
     def previous_successful_run(self, failed_run: GitHubRun, branch: str = "main") -> GitHubRun | None:
         runs = self._list_runs(branch=branch, status="success")

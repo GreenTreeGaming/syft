@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from syft.deterministic.github_runs import GitHubActionsClient
+from syft.deterministic.github_runs import GitHubActionsClient, GitHubRun
 from syft.deterministic.junit_parser import parse_failed_tests
 from syft.deterministic.pipeline import analyze_failed_test
 from syft.deterministic.trace_writer import write_analysis_trace
@@ -37,8 +37,35 @@ def analyze_latest_failed_workflow(
 ) -> WorkflowAnalysis:
     """Analyze every failed pytest test from the latest failed Actions run."""
 
-    repo_path = repo_path.resolve()
     failed_run = github.latest_failed_run(branch)
+    return analyze_failed_workflow(
+        repo_path,
+        github,
+        failed_run,
+        branch=branch,
+        green_branch=green_branch,
+        artifact_name=artifact_name,
+        attempts=attempts,
+        timeout_seconds=timeout_seconds,
+        trace_directory=trace_directory,
+    )
+
+
+def analyze_failed_workflow(
+    repo_path: Path,
+    github: GitHubActionsClient,
+    failed_run: GitHubRun,
+    *,
+    branch: str = "main",
+    green_branch: str = "main",
+    artifact_name: str | None = None,
+    attempts: int = 5,
+    timeout_seconds: int = 60,
+    trace_directory: Path | None = None,
+) -> WorkflowAnalysis:
+    """Analyze one already-discovered failed run without a second discovery race."""
+
+    repo_path = repo_path.resolve()
     green_run = github.previous_successful_run(failed_run, green_branch)
     if green_run is None:
         raise CoordinatorError(
@@ -135,4 +162,3 @@ def _run_git(repo_path: Path, arguments: list[str]) -> None:
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "unknown Git error"
         raise CoordinatorError(f"Git {' '.join(arguments)} failed: {detail}")
-
