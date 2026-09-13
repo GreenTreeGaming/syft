@@ -35,6 +35,10 @@ from syft.models.analysis import CIContext, WorkflowAnalysis
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    # httpx logs complete request URLs at INFO. Slack webhook URLs contain a
+    # credential in the path, so third-party transport logs must stay quiet.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     if arguments[:1] == ["agent"]:
         return _agent_main(arguments[1:])
     if arguments[:1] == ["poll"]:
