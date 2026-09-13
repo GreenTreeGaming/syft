@@ -11,17 +11,17 @@ from typing import Any, Protocol
 import httpx
 
 from syft.agent.models import Explanation, Investigation, ToolCallRecord
-from syft.agent.tools import TOOL_SCHEMAS, allowed_paths, execute_tool
+from syft.agent.tools import TOOL_SCHEMAS, allowed_paths, execute_tool, tool_ok
 from syft.history.store import HistoryStore
 from syft.models.analysis import Classification, TestAnalysis
 
 _INSTRUCTIONS = (
     "You explain a deterministic CI classification. The classification and confidence in the "
     "input are immutable. Never reclassify, second-guess, or propose a different label. "
-    "You may call the provided tools to inspect allowlisted files at the failing commit or "
-    "prior Syft history. Batch tool calls when you can, then stop and return the structured "
-    "explanation. Ground every statement in the supplied evidence. Keep the hypothesis "
-    "explicitly tentative."
+    "This includes ESCALATE: investigate and write a stronger human-triage explanation, but "
+    "do not change the label. Prefer git_diff for code changes, batch tool calls, search_code "
+    "at most once, then stop and return the structured explanation. Ground every statement in "
+    "the supplied evidence. Keep the hypothesis explicitly tentative."
 )
 
 
@@ -93,7 +93,7 @@ class TemplateExplainer:
 
 
 class OpenAIExplainer:
-    """Investigate FLAKY/REGRESSION explanations with a bounded Responses tool loop."""
+    """Investigate explanations with a bounded Responses tool loop."""
 
     def __init__(
         self,
@@ -104,8 +104,8 @@ class OpenAIExplainer:
         repository: str | None = None,
         history_store: HistoryStore | None = None,
         max_turns: int = 5,
-        max_tool_calls: int = 8,
-        investigation_timeout_seconds: float = 60.0,
+        max_tool_calls: int = 12,
+        investigation_timeout_seconds: float = 90.0,
         transport: httpx.BaseTransport | None = None,
         owns_history: bool = False,
     ) -> None:
@@ -130,7 +130,7 @@ class OpenAIExplainer:
         self._client = httpx.Client(
             base_url="https://api.openai.com/v1",
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=60.0,
+            timeout=90.0,
             transport=transport,
         )
 
@@ -164,10 +164,6 @@ class OpenAIExplainer:
 
     def explain(self, analysis: TestAnalysis) -> Explanation:
         self.tool_trace = []
-        if analysis.classification is Classification.ESCALATE:
-            explanation = TemplateExplainer().explain(analysis)
-            self._record_investigation(analysis, turns=0, fallback=False, timed_out=False, hit_tool_cap=False)
-            return explanation
         try:
             explanation, turns, timed_out, hit_tool_cap, fallback = self._explain_with_tools(analysis)
         except ExplanationError:
@@ -249,7 +245,7 @@ class OpenAIExplainer:
                 "metadata": {"analysis_id": analysis.analysis_id},
             }
             try:
-                response = self._client.post("/responses", json=payload, timeout=min(60.0, remaining))
+                response = self._client.post("/responses", json=payload, timeout=min(90.0, remaining))
                 response.raise_for_status()
                 result = response.json()
             except (httpx.TimeoutException, httpx.HTTPError, ValueError) as error:
@@ -282,16 +278,7 @@ class OpenAIExplainer:
                         {
                             "name": call["name"],
                             "arguments": call["arguments"],
-                            "ok": not output.startswith(
-                                (
-                                    "Path is not",
-                                    "Unknown tool",
-                                    "git failed:",
-                                    "history store not configured",
-                                    "repository not configured",
-                                    "repository path not configured",
-                                )
-                            ),
+                            "ok": tool_ok(output),
                             "preview": output[:200],
                         }
                     )

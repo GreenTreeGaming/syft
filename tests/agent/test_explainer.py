@@ -161,19 +161,36 @@ def test_turn_cap_falls_back_to_template(
     assert len(provider.investigations[0].tool_calls) == 3
 
 
-def test_escalate_does_not_call_openai(workflow_analysis: WorkflowAnalysis) -> None:
+def test_escalate_can_use_the_tool_loop(
+    workflow_analysis: WorkflowAnalysis,
+) -> None:
+    explanation = Explanation(
+        headline="Needs human triage",
+        summary="Signals conflict and no safe automated label exists.",
+        hypothesis="A missing CI service or environment variable may explain the persistent failure.",
+        evidence=["All isolated reruns failed.", "No directly related implementation change."],
+        recommended_action="Triage the CI environment and conflicting evidence.",
+    )
+    captured: list[dict] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("ESCALATE must not call OpenAI")
+        payload = json.loads(request.content)
+        captured.append(payload)
+        names = {item["name"] for item in payload["tools"]}
+        assert "inspect_ci_environment" in names
+        assert "git_diff" in names
+        assert "search_code" in names
+        return httpx.Response(200, json=_message(explanation.model_dump_json()))
 
     provider = OpenAIExplainer("test-key", transport=httpx.MockTransport(handler))
     try:
         result = provider.explain(workflow_analysis.analyses[2])
     finally:
         provider.close()
-    assert result == TemplateExplainer().explain(workflow_analysis.analyses[2])
-    assert provider.tool_trace == []
-    assert provider.investigations[0].tool_calls == []
-    assert provider.investigations[0].turns == 0
+    assert result == explanation
+    assert captured
+    assert provider.investigations[0].used_template_fallback is False
+    assert workflow_analysis.analyses[2].classification.value == "ESCALATE"
 
 
 def test_search_history_tool_result_is_sent_back(
@@ -225,8 +242,8 @@ def test_from_environment_keeps_the_passed_history_store(
         assert provider.history_store is store
         assert provider._owns_history is False
         assert provider.max_turns == 5
-        assert provider.max_tool_calls == 8
-        assert provider.investigation_timeout_seconds == 60.0
+        assert provider.max_tool_calls == 12
+        assert provider.investigation_timeout_seconds == 90.0
     finally:
         provider.close()
     leftover = store.recent_history("owner/repo", "tests/test_flaky.py::test_flaky")
@@ -234,7 +251,7 @@ def test_from_environment_keeps_the_passed_history_store(
     assert leftover[0].workflow_run_id == 42
 
 
-def test_tool_call_cap_falls_back_after_eight_calls(
+def test_tool_call_cap_falls_back_after_twelve_calls(
     workflow_analysis: WorkflowAnalysis, mocker, tmp_path: Path
 ) -> None:
     mocker.patch(
@@ -255,7 +272,7 @@ def test_tool_call_cap_falls_back_after_eight_calls(
                         "name": "read_file",
                         "arguments": json.dumps({"path": "tests/test_flaky.py"}),
                     }
-                    for index in range(8)
+                    for index in range(12)
                 ]
             },
         )
@@ -271,7 +288,7 @@ def test_tool_call_cap_falls_back_after_eight_calls(
         provider.close()
     assert "Flaky behavior detected" in result.headline
     assert requests["count"] == 1
-    assert len(provider.tool_trace) == 8
+    assert len(provider.tool_trace) == 12
     assert provider.investigations[0].hit_tool_cap is True
     assert provider.investigations[0].used_template_fallback is True
 
@@ -286,7 +303,7 @@ def test_investigation_timeout_falls_back_without_reclassifying(
         if current == 0.0:
             clock["value"] = 0.1
         else:
-            clock["value"] = 61.0
+            clock["value"] = 91.0
         return current
 
     mocker.patch("syft.agent.explainer.time.monotonic", side_effect=monotonic)
