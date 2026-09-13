@@ -5,4 +5,4 @@ __pycache__/
 *.py[cod]
 artifacts/
 traces/
-
+.syft-agent-state.json

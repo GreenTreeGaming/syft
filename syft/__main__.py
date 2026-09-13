@@ -9,6 +9,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from syft.agent.explainer import ExplanationError, OpenAIExplainer, TemplateExplainer
+from syft.agent.orchestrator import run_agent
+from syft.agent.state import ActionLedger
 from syft.deterministic.coordinator import CoordinatorError, analyze_latest_failed_workflow
 from syft.deterministic.git_analysis import GitAnalysisError
 from syft.deterministic.github_runs import (
@@ -22,12 +25,18 @@ from syft.deterministic.rerunner import RerunError
 from syft.deterministic.trace_writer import write_analysis_trace
 from syft.eval.ground_truth import load_ground_truth
 from syft.eval.metrics import evaluate_predictions, format_report
-from syft.models.analysis import CIContext
+from syft.integrations import IntegrationError
+from syft.integrations.github import GitHubQuarantineClient
+from syft.integrations.linear import LinearClient
+from syft.integrations.slack import SlackWebhookClient
+from syft.models.analysis import CIContext, WorkflowAnalysis
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    if arguments[:1] == ["agent"]:
+        return _agent_main(arguments[1:])
     if arguments[:1] == ["poll"]:
         return _poll_main(arguments[1:])
     if arguments[:1] == ["analyze"]:
@@ -80,6 +89,59 @@ def _analyze_main(argv: list[str]) -> int:
         parser.error(str(error))
     print(analysis.consumer_dump_json(indent=2))
     print(f"Trace written to {trace_path}", file=sys.stderr)
+    return 0
+
+
+def _agent_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Explain and act on a Syft WorkflowAnalysis")
+    parser.add_argument("--input", required=True, type=Path, help="compact WorkflowAnalysis JSON file")
+    parser.add_argument("--repo", type=Path, help="local tested repo used for exact-commit source context")
+    parser.add_argument("--execute", action="store_true", help="perform real GitHub, Linear, and Slack writes")
+    parser.add_argument("--use-openai", action="store_true", help="generate explanations with OpenAI")
+    parser.add_argument("--state-file", type=Path, default=Path(".syft-agent-state.json"))
+    arguments = parser.parse_args(argv)
+
+    openai = None
+    github = None
+    linear = None
+    slack = None
+    try:
+        workflow = WorkflowAnalysis.model_validate_json(arguments.input.read_text(encoding="utf-8"))
+        explainer = TemplateExplainer()
+        if arguments.use_openai:
+            openai = OpenAIExplainer.from_environment(arguments.repo)
+            explainer = openai
+        if arguments.execute:
+            github = GitHubQuarantineClient(
+                os.getenv("GITHUB_TOKEN", ""),
+                workflow.repository,
+            )
+            linear = LinearClient(
+                os.getenv("LINEAR_API_KEY", ""),
+                os.getenv("LINEAR_TEAM_ID", ""),
+            )
+            slack = SlackWebhookClient(os.getenv("SLACK_WEBHOOK_URL", ""))
+        result = run_agent(
+            workflow,
+            explainer,
+            ActionLedger(arguments.state_file),
+            dry_run=not arguments.execute,
+            github=github,
+            linear=linear,
+            slack=slack,
+        )
+    except (ExplanationError, IntegrationError, OSError, ValueError) as error:
+        parser.error(str(error))
+    finally:
+        if openai:
+            openai.close()
+        if github:
+            github.close()
+        if linear:
+            linear.close()
+        if slack:
+            slack.close()
+    print(result.model_dump_json(indent=2))
     return 0
 
 
