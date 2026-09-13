@@ -161,19 +161,36 @@ def test_turn_cap_falls_back_to_template(
     assert len(provider.investigations[0].tool_calls) == 3
 
 
-def test_escalate_does_not_call_openai(workflow_analysis: WorkflowAnalysis) -> None:
+def test_escalate_can_use_the_tool_loop(
+    workflow_analysis: WorkflowAnalysis,
+) -> None:
+    explanation = Explanation(
+        headline="Needs human triage",
+        summary="Signals conflict and no safe automated label exists.",
+        hypothesis="A missing CI service or environment variable may explain the persistent failure.",
+        evidence=["All isolated reruns failed.", "No directly related implementation change."],
+        recommended_action="Triage the CI environment and conflicting evidence.",
+    )
+    captured: list[dict] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("ESCALATE must not call OpenAI")
+        payload = json.loads(request.content)
+        captured.append(payload)
+        names = {item["name"] for item in payload["tools"]}
+        assert "inspect_ci_environment" in names
+        assert "git_diff" in names
+        assert "search_code" in names
+        return httpx.Response(200, json=_message(explanation.model_dump_json()))
 
     provider = OpenAIExplainer("test-key", transport=httpx.MockTransport(handler))
     try:
         result = provider.explain(workflow_analysis.analyses[2])
     finally:
         provider.close()
-    assert result == TemplateExplainer().explain(workflow_analysis.analyses[2])
-    assert provider.tool_trace == []
-    assert provider.investigations[0].tool_calls == []
-    assert provider.investigations[0].turns == 0
+    assert result == explanation
+    assert captured
+    assert provider.investigations[0].used_template_fallback is False
+    assert workflow_analysis.analyses[2].classification.value == "ESCALATE"
 
 
 def test_search_history_tool_result_is_sent_back(
@@ -312,5 +329,6 @@ def test_investigation_timeout_falls_back_without_reclassifying(
         provider.close()
     assert result.headline.startswith("Flaky behavior detected")
     assert provider.investigations[0].timed_out is True
+    assert provider.investigations[0].hit_tool_cap is False
     assert provider.investigations[0].used_template_fallback is True
-    assert len(provider.tool_trace) == 1
+    assert provider.tool_trace == []
