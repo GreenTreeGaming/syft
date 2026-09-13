@@ -137,7 +137,10 @@ def _agent_main(argv: list[str]) -> int:
         )
         explainer = TemplateExplainer()
         if arguments.use_openai:
-            openai = OpenAIExplainer.from_environment(arguments.repo)
+            openai = OpenAIExplainer.from_environment(
+                arguments.repo,
+                repository=workflow.repository,
+            )
             explainer = openai
         if arguments.execute:
             github = GitHubQuarantineClient(
@@ -278,7 +281,10 @@ def _watch_main(argv: list[str]) -> int:
         )
         explainer = TemplateExplainer()
         if arguments.use_openai:
-            openai = OpenAIExplainer.from_environment(repo)
+            openai = OpenAIExplainer.from_environment(
+                repo,
+                repository=github_discovery.repository,
+            )
             explainer = openai
         if arguments.execute:
             github_actions = GitHubQuarantineClient(

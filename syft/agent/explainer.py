@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-from pathlib import Path, PurePosixPath
-from typing import Protocol
+from pathlib import Path
+from typing import Any, Protocol
 
 import httpx
 
 from syft.agent.models import Explanation
+from syft.agent.tools import TOOL_SCHEMAS, allowed_paths, execute_tool
+from syft.history.store import HistoryStore
 from syft.models.analysis import Classification, TestAnalysis
+
+_INSTRUCTIONS = (
+    "You explain a deterministic CI classification. The classification and confidence in the "
+    "input are immutable. Never reclassify, second-guess, or propose a different label. "
+    "You may call the provided tools to inspect allowlisted files at the failing commit or "
+    "prior Syft history. Ground every statement in the supplied evidence. Keep the hypothesis "
+    "explicitly tentative. When you are done investigating, return the structured explanation."
+)
 
 
 class ExplanationError(RuntimeError):
@@ -71,7 +80,7 @@ class TemplateExplainer:
 
 
 class OpenAIExplainer:
-    """Generate an explanation with Structured Outputs via the Responses API."""
+    """Investigate FLAKY/REGRESSION explanations with a bounded Responses tool loop."""
 
     def __init__(
         self,
@@ -79,12 +88,23 @@ class OpenAIExplainer:
         model: str = "gpt-5.4-mini",
         *,
         repo_path: Path | None = None,
+        repository: str | None = None,
+        history_store: HistoryStore | None = None,
+        max_turns: int = 3,
         transport: httpx.BaseTransport | None = None,
+        owns_history: bool = False,
     ) -> None:
         if not api_key:
             raise ExplanationError("OPENAI_API_KEY is required when --use-openai is enabled")
+        if max_turns < 1:
+            raise ExplanationError("max_turns must be >= 1")
         self.model_name = model
         self.repo_path = repo_path.resolve() if repo_path else None
+        self.repository = repository
+        self.history_store = history_store
+        self.max_turns = max_turns
+        self.tool_trace: list[dict[str, Any]] = []
+        self._owns_history = owns_history
         self._client = httpx.Client(
             base_url="https://api.openai.com/v1",
             headers={"Authorization": f"Bearer {api_key}"},
@@ -93,52 +113,136 @@ class OpenAIExplainer:
         )
 
     @classmethod
-    def from_environment(cls, repo_path: Path | None = None) -> "OpenAIExplainer":
+    def from_environment(
+        cls,
+        repo_path: Path | None = None,
+        *,
+        repository: str | None = None,
+    ) -> "OpenAIExplainer":
+        history_path = os.getenv("SYFT_HISTORY_PATH")
+        history_store = HistoryStore(Path(history_path)) if history_path else None
         return cls(
-            api_key=os.getenv("OPENAI_API_KEY", ""),
-            model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"),
+            os.getenv("OPENAI_API_KEY", ""),
+            os.getenv("OPENAI_MODEL", "gpt-5.4-mini"),
             repo_path=repo_path,
+            repository=repository,
+            history_store=history_store,
+            owns_history=history_store is not None,
         )
 
     def close(self) -> None:
         self._client.close()
+        if self._owns_history and self.history_store is not None:
+            self.history_store.close()
 
     def explain(self, analysis: TestAnalysis) -> Explanation:
-        evidence = {
-            "deterministic_analysis": analysis.consumer_dump(),
-            "repository_context": _repository_context(self.repo_path, analysis),
-        }
-        payload = {
-            "model": self.model_name,
-            "store": False,
-            "instructions": (
-                "You explain a deterministic CI classification. The classification and confidence in the "
-                "input are immutable. Never reclassify, second-guess, or propose a different label. Ground "
-                "every statement in the supplied evidence. Keep the hypothesis explicitly tentative."
-            ),
-            "input": json.dumps(evidence, default=str),
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "syft_failure_explanation",
-                    "strict": True,
-                    "schema": Explanation.model_json_schema(),
-                }
-            },
-            "max_output_tokens": 700,
-            "metadata": {"analysis_id": analysis.analysis_id},
-        }
+        self.tool_trace = []
+        if analysis.classification is Classification.ESCALATE:
+            return TemplateExplainer().explain(analysis)
         try:
-            response = self._client.post("/responses", json=payload)
-            response.raise_for_status()
-            result = response.json()
-            return Explanation.model_validate_json(_response_output_text(result))
-        except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
-            raise ExplanationError(f"OpenAI explanation failed: {error}") from error
+            return self._explain_with_tools(analysis)
+        except ExplanationError:
+            return TemplateExplainer().explain(analysis)
+
+    def _explain_with_tools(self, analysis: TestAnalysis) -> Explanation:
+        conversation: list[Any] = [
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "deterministic_analysis": analysis.consumer_dump(),
+                        "allowed_paths": allowed_paths(analysis),
+                    },
+                    default=str,
+                ),
+            }
+        ]
+        schema = Explanation.model_json_schema()
+        for _turn in range(self.max_turns):
+            payload = {
+                "model": self.model_name,
+                "store": False,
+                "instructions": _INSTRUCTIONS,
+                "input": conversation,
+                "tools": TOOL_SCHEMAS,
+                "tool_choice": "auto",
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "syft_failure_explanation",
+                        "strict": True,
+                        "schema": schema,
+                    }
+                },
+                "max_output_tokens": 900,
+                "metadata": {"analysis_id": analysis.analysis_id},
+            }
+            try:
+                response = self._client.post("/responses", json=payload)
+                response.raise_for_status()
+                result = response.json()
+            except (httpx.HTTPError, ValueError) as error:
+                raise ExplanationError(f"OpenAI explanation failed: {error}") from error
+            calls = _function_calls(result)
+            if calls:
+                for item in result.get("output", []):
+                    if isinstance(item, dict):
+                        conversation.append(item)
+                for call in calls:
+                    output = execute_tool(
+                        call["name"],
+                        call["arguments"],
+                        analysis=analysis,
+                        repo_path=self.repo_path,
+                        history_store=self.history_store,
+                        repository=self.repository,
+                    )
+                    self.tool_trace.append(
+                        {
+                            "name": call["name"],
+                            "arguments": call["arguments"],
+                            "ok": not output.startswith(("Path is not", "Unknown tool", "git failed:")),
+                            "preview": output[:200],
+                        }
+                    )
+                    conversation.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call["call_id"],
+                            "output": output,
+                        }
+                    )
+                continue
+            try:
+                return Explanation.model_validate_json(_response_output_text(result))
+            except (ExplanationError, ValueError) as error:
+                raise ExplanationError(f"OpenAI explanation failed: {error}") from error
+        return TemplateExplainer().explain(analysis)
 
 
-def _response_output_text(payload: dict[str, object]) -> str:
-    for item in payload.get("output", []):  # type: ignore[union-attr]
+def _function_calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for item in payload.get("output", []):
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            continue
+        raw_arguments = item.get("arguments", "{}")
+        if isinstance(raw_arguments, str):
+            try:
+                parsed = json.loads(raw_arguments) if raw_arguments else {}
+            except json.JSONDecodeError:
+                parsed = {}
+        elif isinstance(raw_arguments, dict):
+            parsed = raw_arguments
+        else:
+            parsed = {}
+        call_id = item.get("call_id") or item.get("id") or f"call_{len(calls)}"
+        name = item.get("name") or ""
+        calls.append({"name": str(name), "arguments": parsed, "call_id": str(call_id)})
+    return calls
+
+
+def _response_output_text(payload: dict[str, Any]) -> str:
+    for item in payload.get("output", []):
         if not isinstance(item, dict) or item.get("type") != "message":
             continue
         for content in item.get("content", []):
@@ -147,30 +251,3 @@ def _response_output_text(payload: dict[str, object]) -> str:
                 if isinstance(text, str):
                     return text
     raise ExplanationError("OpenAI response contained no output_text")
-
-
-def _repository_context(repo_path: Path | None, analysis: TestAnalysis) -> dict[str, str]:
-    if repo_path is None:
-        return {}
-    paths = [analysis.test.file, *analysis.code_evidence.related_files]
-    context: dict[str, str] = {}
-    for raw_path in dict.fromkeys(paths):
-        path = PurePosixPath(raw_path)
-        if path.is_absolute() or ".." in path.parts:
-            continue
-        try:
-            completed = subprocess.run(
-                ["git", "show", f"{analysis.commit_evidence.current_commit}:{path.as_posix()}"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=10,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if completed.returncode == 0:
-            context[path.as_posix()] = completed.stdout[:6000]
-        if len(context) == 4:
-            break
-    return context
