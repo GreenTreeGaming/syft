@@ -37,6 +37,15 @@ from syft.history.summary import workflow_history_summary
 from syft.models.analysis import CIContext, WorkflowAnalysis
 from syft.watch import ProcessedRunLedger, WatchError, WorkflowWatcher, watch_forever
 
+_DEMO_ENVIRONMENT_KEYS = {
+    "GITHUB_TOKEN",
+    "OPENAI_API_KEY",
+    "OPENAI_MODEL",
+    "LINEAR_API_KEY",
+    "LINEAR_TEAM_ID",
+    "SLACK_WEBHOOK_URL",
+}
+
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -70,6 +79,7 @@ def _demo_main(argv: list[str]) -> int:
     parser.add_argument("--dry-run", action="store_true", help="plan actions without external writes")
     arguments = parser.parse_args(argv)
 
+    _load_demo_environment(Path(__file__).resolve().parents[1] / ".env")
     demo_directory = Path(tempfile.mkdtemp(prefix="syft-demo-"))
     print(f"Syft demo workspace: {demo_directory}", file=sys.stderr)
     execution_flag = "--dry-run" if arguments.dry_run else "--execute"
@@ -104,6 +114,25 @@ def _demo_main(argv: list[str]) -> int:
             str(demo_directory / "traces"),
         ]
     )
+
+
+def _load_demo_environment(path: Path) -> None:
+    """Load known demo settings from a gitignored dotenv file without overriding the shell."""
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.removeprefix("export ").strip()
+        if key not in _DEMO_ENVIRONMENT_KEYS:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        if value:
+            os.environ.setdefault(key, value)
 
 
 def _analyze_main(argv: list[str]) -> int:

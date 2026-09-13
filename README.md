@@ -90,7 +90,7 @@ Set `GITHUB_TOKEN` and `GITHUB_REPOSITORY=owner/repo` when using GitHub run disc
 
 ## Run the complete hackathon demo
 
-With the maintained `syft-testing` fixture cloned beside this repository and the GitHub, OpenAI, Linear, and Slack credentials already configured, launch the full three-app workflow with one command:
+With the maintained `syft-testing` fixture cloned beside this repository, put the GitHub, OpenAI, Linear, and Slack credentials in the gitignored `.env` file. The demo command loads those known settings automatically without overriding values already present in the shell. Then launch the full three-app workflow with one command:
 
 ```bash
 python -m syft demo
