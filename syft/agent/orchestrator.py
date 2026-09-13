@@ -32,7 +32,13 @@ def run_agent(
 ) -> AgentRun:
     if history is not None and history.repository != workflow.repository:
         raise ValueError("History repository does not match workflow repository")
+    if hasattr(explainer, "investigations"):
+        explainer.investigations.clear()
     plans = build_action_plans(workflow, explainer)
+    investigations = [
+        item.model_copy(update={"workflow_run_id": workflow.workflow_run_id})
+        for item in getattr(explainer, "investigations", [])
+    ]
     results: list[ActionResult] = []
 
     for plan, analysis in zip(plans, workflow.analyses, strict=True):
@@ -165,6 +171,7 @@ def run_agent(
         results=results,
         slack_digest=digest,
         history=history,
+        investigations=investigations,
     )
 
 

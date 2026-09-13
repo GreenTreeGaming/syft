@@ -137,7 +137,11 @@ def _agent_main(argv: list[str]) -> int:
         )
         explainer = TemplateExplainer()
         if arguments.use_openai:
-            openai = OpenAIExplainer.from_environment(arguments.repo)
+            openai = OpenAIExplainer.from_environment(
+                arguments.repo,
+                repository=workflow.repository,
+                history_store=history_store,
+            )
             explainer = openai
         if arguments.execute:
             github = GitHubQuarantineClient(
@@ -165,6 +169,7 @@ def _agent_main(argv: list[str]) -> int:
             publish_github_summary=True,
             history=history,
         )
+        history_store.record_investigations(workflow, result.investigations)
     except (ExplanationError, IntegrationError, OSError, sqlite3.Error, ValueError) as error:
         parser.error(str(error))
     finally:
@@ -276,9 +281,14 @@ def _watch_main(argv: list[str]) -> int:
             os.getenv("GITHUB_TOKEN", ""),
             arguments.github_repository or "",
         )
+        history_store = HistoryStore(arguments.history_db)
         explainer = TemplateExplainer()
         if arguments.use_openai:
-            openai = OpenAIExplainer.from_environment(repo)
+            openai = OpenAIExplainer.from_environment(
+                repo,
+                repository=github_discovery.repository,
+                history_store=history_store,
+            )
             explainer = openai
         if arguments.execute:
             github_actions = GitHubQuarantineClient(
@@ -294,7 +304,6 @@ def _watch_main(argv: list[str]) -> int:
                 os.getenv("LINEAR_TEAM_ID", ""),
             )
             slack = SlackWebhookClient(os.getenv("SLACK_WEBHOOK_URL", ""))
-        history_store = HistoryStore(arguments.history_db)
         watcher = WorkflowWatcher(
             repo_path=repo,
             github=github_discovery,

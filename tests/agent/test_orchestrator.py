@@ -15,15 +15,28 @@ def test_dry_run_plans_actions_without_clients(
     workflow_analysis: WorkflowAnalysis,
     tmp_path: Path,
 ) -> None:
+    explainer = TemplateExplainer()
     result = run_agent(
         workflow_analysis,
-        TemplateExplainer(),
+        explainer,
         ActionLedger(tmp_path / "state.json"),
     )
     assert result.dry_run is True
     assert [item.status for item in result.results] == [ActionStatus.PLANNED] * 4
     assert "1 flaky · 1 regression · 1 needs triage" in result.slack_digest
     assert "LLM only explains" in result.slack_digest
+    assert len(result.investigations) == 3
+    assert {item.test_node_id for item in result.investigations} == {
+        analysis.test.node_id for analysis in workflow_analysis.analyses
+    }
+    assert all(item.workflow_run_id == workflow_analysis.workflow_run_id for item in result.investigations)
+    again = run_agent(
+        workflow_analysis,
+        explainer,
+        ActionLedger(tmp_path / "state-again.json"),
+    )
+    assert len(again.investigations) == 3
+    assert len(explainer.investigations) == 3
 
 
 def test_execute_records_and_reuses_actions(

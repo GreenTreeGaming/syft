@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from syft.history.models import HistoryRecord
 from syft.models.analysis import Classification, WorkflowAnalysis
+
+if TYPE_CHECKING:
+    from syft.agent.models import Investigation
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS test_history (
@@ -25,6 +30,18 @@ CREATE TABLE IF NOT EXISTS test_history (
 );
 CREATE INDEX IF NOT EXISTS idx_test_history_lookup
     ON test_history (repository, test_node_id, recorded_at DESC, workflow_run_id DESC);
+CREATE TABLE IF NOT EXISTS investigations (
+    repository TEXT NOT NULL,
+    workflow_run_id INTEGER NOT NULL,
+    test_node_id TEXT NOT NULL,
+    analysis_id TEXT NOT NULL,
+    turns INTEGER NOT NULL,
+    timed_out INTEGER NOT NULL,
+    hit_tool_cap INTEGER NOT NULL,
+    used_template_fallback INTEGER NOT NULL,
+    calls_json TEXT NOT NULL,
+    PRIMARY KEY (repository, workflow_run_id, test_node_id)
+);
 """
 
 _INSERT = """
@@ -107,6 +124,66 @@ class HistoryStore:
     def repository_history(self, repository: str) -> list[HistoryRecord]:
         cursor = self._connection.execute(_SELECT_REPO, (repository,))
         return [_row_to_record(row) for row in cursor.fetchall()]
+
+    def record_investigations(
+        self,
+        workflow: WorkflowAnalysis,
+        investigations: list[Investigation],
+    ) -> None:
+        rows = [
+            (
+                workflow.repository,
+                workflow.workflow_run_id,
+                item.test_node_id,
+                item.analysis_id,
+                item.turns,
+                int(item.timed_out),
+                int(item.hit_tool_cap),
+                int(item.used_template_fallback),
+                json.dumps([call.model_dump() for call in item.tool_calls]),
+            )
+            for item in investigations
+        ]
+        if not rows:
+            return
+        self._connection.executemany(
+            """
+            INSERT OR REPLACE INTO investigations (
+                repository, workflow_run_id, test_node_id, analysis_id, turns,
+                timed_out, hit_tool_cap, used_template_fallback, calls_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        self._connection.commit()
+
+    def load_investigations(self, repository: str, workflow_run_id: int) -> list[Investigation]:
+        from syft.agent.models import Investigation
+
+        cursor = self._connection.execute(
+            """
+            SELECT analysis_id, test_node_id, workflow_run_id, turns, timed_out,
+                   hit_tool_cap, used_template_fallback, calls_json
+            FROM investigations
+            WHERE repository = ? AND workflow_run_id = ?
+            """,
+            (repository, workflow_run_id),
+        )
+        results: list[Investigation] = []
+        for row in cursor.fetchall():
+            results.append(
+                Investigation(
+                    analysis_id=row["analysis_id"],
+                    test_node_id=row["test_node_id"],
+                    workflow_run_id=int(row["workflow_run_id"]),
+                    turns=int(row["turns"]),
+                    tool_calls=json.loads(row["calls_json"]),
+                    timed_out=bool(row["timed_out"]),
+                    hit_tool_cap=bool(row["hit_tool_cap"]),
+                    used_template_fallback=bool(row["used_template_fallback"]),
+                )
+            )
+        return results
 
 
 def _as_utc(value: datetime) -> datetime:

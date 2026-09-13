@@ -84,6 +84,39 @@ def test_duplicate_workflow_ingestion_does_not_duplicate_records(
         assert flaky[0].workflow_run_id == 42
 
 
+def test_investigations_are_stored_and_replaced(
+    workflow_analysis: WorkflowAnalysis,
+    tmp_path: Path,
+) -> None:
+    from syft.agent.models import Investigation, ToolCallRecord
+
+    first = Investigation(
+        analysis_id=workflow_analysis.analyses[0].analysis_id,
+        test_node_id=workflow_analysis.analyses[0].test.node_id,
+        workflow_run_id=workflow_analysis.workflow_run_id,
+        turns=2,
+        tool_calls=[
+            ToolCallRecord(name="read_file", arguments={"path": "tests/test_flaky.py"}, ok=True, preview="source")
+        ],
+        used_template_fallback=False,
+    )
+    updated = first.model_copy(
+        update={"turns": 3, "hit_tool_cap": True, "used_template_fallback": True}
+    )
+    with HistoryStore(tmp_path / "history.sqlite") as store:
+        store.record_workflow(workflow_analysis)
+        store.record_investigations(workflow_analysis, [first])
+        loaded = store.load_investigations("owner/repo", 42)
+        assert len(loaded) == 1
+        assert loaded[0].tool_calls[0].name == "read_file"
+        assert loaded[0].turns == 2
+        store.record_investigations(workflow_analysis, [updated])
+        reloaded = store.load_investigations("owner/repo", 42)
+        assert len(reloaded) == 1
+        assert reloaded[0].turns == 3
+        assert reloaded[0].hit_tool_cap is True
+        assert reloaded[0].used_template_fallback is True
+
 def test_workflow_history_summary_is_bounded_and_keyed_by_test(
     workflow_analysis: WorkflowAnalysis,
     tmp_path: Path,

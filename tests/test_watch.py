@@ -121,12 +121,17 @@ def test_successful_cycle_records_history_in_agent_artifact(
         watcher.history_store = history_store
         result = watcher.run_cycle()
         records = history_store.repository_history("owner/repo")
+        saved = history_store.load_investigations("owner/repo", 42)
 
     payload = json.loads(result.agent_run_path.read_text(encoding="utf-8"))
     assert len(records) == 3
     assert payload["history"]["records"] == 3
     assert payload["history"]["workflow_runs"] == 1
     assert payload["history"]["by_test"]["tests/test_flaky.py::test_flaky"]["flaky_count"] == 1
+    assert len(payload["investigations"]) == 3
+    assert {item.test_node_id for item in saved} == {
+        analysis.test.node_id for analysis in workflow_analysis.analyses
+    }
 
 
 def test_no_failed_run_is_a_normal_cycle(

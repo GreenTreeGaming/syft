@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from html import escape
 from pathlib import Path
 from urllib.parse import urlparse
 
-from syft.agent.models import ActionKind, ActionPlan, ActionResult, ActionStatus, AgentRun
+from syft.agent.models import (
+    ActionKind,
+    ActionPlan,
+    ActionResult,
+    ActionStatus,
+    AgentRun,
+    Investigation,
+)
 from syft.eval.ground_truth import GroundTruthCase
 from syft.eval.metrics import EvalMetrics, evaluate_predictions
 from syft.models.analysis import Classification, TestAnalysis, WorkflowAnalysis
@@ -145,6 +153,9 @@ table.confusion-matrix td[data-diagonal="true"] { color: var(--accent); font-wei
   font-size: 0.8rem;
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 }
+.investigation { margin-top: 12px; }
+.investigation ol { margin: 8px 0 0; padding-left: 1.2rem; }
+.investigation li { margin: 6px 0; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .actions a {
   color: var(--bg);
@@ -395,6 +406,7 @@ def _render_test_card(analysis: TestAnalysis, agent_run: AgentRun | None) -> str
             file_html,
             _fact("Hypothesis", hypothesis),
             _fact("Recommended action", recommended),
+            _render_investigation(_match_investigation(analysis, agent_run), agent_run),
             _render_action_links(plan, result),
             "</article>",
         ]
@@ -407,6 +419,68 @@ def _fact(label: str, value: object) -> str:
     return (
         f'<div class="fact"><div class="k">{html_escape(label)}</div>'
         f'<div class="v">{html_escape(value)}</div></div>'
+    )
+
+
+def _match_investigation(
+    analysis: TestAnalysis,
+    agent_run: AgentRun | None,
+) -> Investigation | None:
+    if agent_run is None:
+        return None
+    match = next(
+        (item for item in agent_run.investigations if item.analysis_id == analysis.analysis_id),
+        None,
+    )
+    if match is not None:
+        return match
+    return next(
+        (item for item in agent_run.investigations if item.test_node_id == analysis.test.node_id),
+        None,
+    )
+
+
+def _render_investigation(investigation: Investigation | None, agent_run: AgentRun | None) -> str:
+    if agent_run is None:
+        return ""
+    if investigation is None:
+        return (
+            '<div class="investigation" data-testid="investigation-missing">'
+            '<div class="fact"><div class="k">Investigation</div>'
+            '<div class="v muted">No investigation trace was recorded.</div></div></div>'
+        )
+    flags = []
+    if investigation.timed_out:
+        flags.append("timed out")
+    if investigation.hit_tool_cap:
+        flags.append("hit tool cap")
+    if investigation.used_template_fallback:
+        flags.append("template fallback")
+    flag_text = f" ({', '.join(flags)})" if flags else ""
+    header = (
+        f'<div class="fact"><div class="k">Investigation</div>'
+        f'<div class="v">{html_escape(investigation.turns)} turn'
+        f"{'' if investigation.turns == 1 else 's'}"
+        f"{html_escape(flag_text)}</div></div>"
+    )
+    if not investigation.tool_calls:
+        return (
+            f'<div class="investigation" data-testid="investigation">{header}'
+            '<p class="muted">No tools were invoked.</p></div>'
+        )
+    items = []
+    for call in investigation.tool_calls:
+        status = "ok" if call.ok else "rejected"
+        arguments = json.dumps(call.arguments, sort_keys=True)
+        items.append(
+            f'<li data-tool-name="{html_escape(call.name)}" data-tool-ok="{html_escape(call.ok)}">'
+            f"<strong>{html_escape(call.name)}</strong> {html_escape(status)} "
+            f"<code>{html_escape(arguments)}</code>"
+            f'<div class="trace">{html_escape(call.preview)}</div></li>'
+        )
+    return (
+        f'<div class="investigation" data-testid="investigation">{header}'
+        f"<ol>{''.join(items)}</ol></div>"
     )
 
 
