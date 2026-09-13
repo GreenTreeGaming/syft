@@ -50,13 +50,9 @@ Syft connects to three apps:
 | Linear | Opens a regression issue or a needs-triage issue. Never edits product code for those cases. |
 | Slack | Posts one digest with counts, labels, and links. |
 
-OpenAI is optional. When `--use-openai` is set, it only explains evidence the classifier already labeled.
-
 ## Demo
 
-Two-minute demo: **[add the public video URL here]**
-
-Shot list used for the recording: [demo script](docs/demo-script.md).
+Two-minute demo: **[[add the public video URL here]](https://youtu.be/vsZHP6MPt4I)**
 
 ## How we tested reliability
 
