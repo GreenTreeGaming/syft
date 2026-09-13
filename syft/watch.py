@@ -21,6 +21,8 @@ from syft.integrations.github import GitHubQuarantineClient
 from syft.integrations.github_summary import GitHubPRSummaryClient
 from syft.integrations.linear import LinearClient
 from syft.integrations.slack import SlackWebhookClient
+from syft.history.store import HistoryStore
+from syft.history.summary import workflow_history_summary
 from syft.models.analysis import WorkflowAnalysis
 
 LOGGER = logging.getLogger(__name__)
@@ -109,6 +111,8 @@ class WorkflowWatcher:
         github_summary: GitHubPRSummaryClient | None = None,
         linear: LinearClient | None = None,
         slack: SlackWebhookClient | None = None,
+        history_store: HistoryStore | None = None,
+        history_limit: int = 20,
         analyzer: Callable[..., WorkflowAnalysis] = analyze_failed_workflow,
     ) -> None:
         self.repo_path = repo_path
@@ -128,6 +132,8 @@ class WorkflowWatcher:
         self.github_summary = github_summary
         self.linear = linear
         self.slack = slack
+        self.history_store = history_store
+        self.history_limit = history_limit
         self.analyzer = analyzer
 
     def run_cycle(self) -> WatchResult:
@@ -156,6 +162,20 @@ class WorkflowWatcher:
             timeout_seconds=self.timeout_seconds,
             trace_directory=self.trace_directory,
         )
+        history = None
+        if self.history_store is not None:
+            inserted = self.history_store.record_workflow(workflow)
+            history = workflow_history_summary(
+                self.history_store,
+                workflow,
+                limit=self.history_limit,
+            )
+            LOGGER.info(
+                "history_recorded workflow_run_id=%s inserted=%s total_records=%s",
+                workflow.workflow_run_id,
+                inserted,
+                history.records,
+            )
         agent_run = run_agent(
             workflow,
             self.explainer,
@@ -166,6 +186,7 @@ class WorkflowWatcher:
             slack=self.slack,
             github_summary=self.github_summary,
             publish_github_summary=True,
+            history=history,
         )
         if self.execute:
             failures = [

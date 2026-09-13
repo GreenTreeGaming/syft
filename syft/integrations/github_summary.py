@@ -10,6 +10,7 @@ import httpx
 
 from syft.agent.models import ActionKind, ActionPlan, ActionResult, ActionStatus
 from syft.integrations import IntegrationError
+from syft.history.models import TestHistorySummary, WorkflowHistorySummary
 from syft.models.analysis import TestAnalysis, WorkflowAnalysis
 
 
@@ -47,6 +48,8 @@ class GitHubPRSummaryClient:
         workflow: WorkflowAnalysis,
         plans: list[ActionPlan],
         results: list[ActionResult],
+        *,
+        history: WorkflowHistorySummary | None = None,
     ) -> ActionResult:
         action_id = summary_action_id(workflow.workflow_analysis_id)
         pull = self._find_open_pull_request(workflow.branch)
@@ -64,7 +67,7 @@ class GitHubPRSummaryClient:
             raise IntegrationError("GitHub returned a pull request without a valid number") from error
 
         marker = summary_marker()
-        body = render_pr_summary(workflow, plans, results)
+        body = render_pr_summary(workflow, plans, results, history=history)
         existing = self._find_summary_comment(pull_number, marker)
         if existing is not None:
             try:
@@ -133,9 +136,13 @@ def render_pr_summary(
     workflow: WorkflowAnalysis,
     plans: list[ActionPlan],
     results: list[ActionResult],
+    *,
+    history: WorkflowHistorySummary | None = None,
 ) -> str:
     """Render a compact, escaped GitHub-flavored Markdown evidence summary."""
 
+    if history is not None and history.repository != workflow.repository:
+        raise ValueError("History repository does not match workflow repository")
     plans_by_analysis = {plan.analysis_id: plan for plan in plans}
     results_by_action = {result.action_id: result for result in results}
     run_url = f"https://github.com/{workflow.repository}/actions/runs/{workflow.workflow_run_id}"
@@ -150,13 +157,24 @@ def render_pr_summary(
         "",
         "> Classifications are deterministic. The LLM only explains collected evidence.",
         "",
-        "| Test | Classification | Confidence | Isolated reruns | Evidence | Action |",
-        "|---|---:|---:|---:|---|---|",
+        "| Test | Classification | Confidence | Isolated reruns | History | Evidence | Action |",
+        "|---|---:|---:|---:|---|---|---|",
     ]
     for analysis in workflow.analyses:
         plan = plans_by_analysis.get(analysis.analysis_id)
         result = results_by_action.get(plan.action_id) if plan else None
-        lines.append(_analysis_row(analysis, result))
+        trend = history.by_test.get(analysis.test.node_id) if history else None
+        lines.append(_analysis_row(analysis, result, trend))
+    if history:
+        lines.extend(
+            [
+                "",
+                (
+                    f"**Historical coverage:** {history.records} observations across "
+                    f"{history.tests} tests and {history.workflow_runs} workflow runs."
+                ),
+            ]
+        )
     lines.extend(
         [
             "",
@@ -184,7 +202,11 @@ def summary_marker() -> str:
     return "<!-- syft-ci-summary:v1 -->"
 
 
-def _analysis_row(analysis: TestAnalysis, result: ActionResult | None) -> str:
+def _analysis_row(
+    analysis: TestAnalysis,
+    result: ActionResult | None,
+    history: TestHistorySummary | None,
+) -> str:
     reruns = f"{analysis.rerun_summary.passed} passed / {analysis.rerun_summary.failed} failed"
     evidence = analysis.reason
     if analysis.trace and analysis.trace.message:
@@ -195,10 +217,22 @@ def _analysis_row(analysis: TestAnalysis, result: ActionResult | None) -> str:
             f"**{_markdown_cell(analysis.classification.value)}**",
             f"{analysis.confidence:.0%}",
             _markdown_cell(reruns),
+            _history_cell(history),
             _markdown_cell(evidence),
             _action_cell(result),
         ]
     ) + " |"
+
+
+def _history_cell(history: TestHistorySummary | None) -> str:
+    if history is None:
+        return "Not recorded"
+    return _markdown_cell(
+        f"{history.observations} occurrence(s); "
+        f"{history.flaky_occurrence_rate:.0%} flaky; "
+        f"{history.rerun_pass_rate:.0%} rerun pass; "
+        f"{history.consecutive_all_failures} consecutive all-fail"
+    )
 
 
 def _action_cell(result: ActionResult | None) -> str:

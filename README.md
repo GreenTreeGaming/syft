@@ -15,6 +15,7 @@ Judge-facing material: [system and reliability brief](docs/system-reliability-br
 - sanitized JSON traces with stable `analysis_id` values
 - evaluation metrics, including the safety-critical `REGRESSION -> FLAKY` count
 - an idempotent evidence summary posted directly on the failed branch's pull request
+- local SQLite test history with flaky frequency, rerun pass rate, and consecutive-failure trends
 
 The downstream action agent is included, but it cannot change the deterministic label or confidence. It uses an LLM only to explain already-classified evidence, then routes flaky tests to quarantine PRs, regressions to Linear issues, ambiguous results to human triage, and posts one Slack digest.
 
@@ -128,6 +129,8 @@ python -m syft watch \
 ```
 
 Use `--once` for one scheduler-friendly cycle. Dry runs and real executions have separate processed-run records, so a rehearsal never suppresses a later `--execute` run. Successful cycles save `analysis.json` and `agent-run.json` beneath `.syft/runs/<workflow-run-id>/`; these are the zero-secret inputs for the standalone HTML reporter. `.syft/watch-state.json` prevents repeat processing, while the existing action ledger prevents duplicate GitHub, Linear, and Slack writes after partial retries.
+
+Every classified workflow is idempotently recorded in `.syft/history.sqlite3` before actions run. Historical context is then attached to the saved agent run, GitHub PR summary, and Slack digest. It is supporting evidence only: history never changes the deterministic classification or confidence. Use `--history-db` to choose another database and `--history-limit` to bound per-test context.
 
 To run the complete worker with real actions and optional OpenAI explanations:
 

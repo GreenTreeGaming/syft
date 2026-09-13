@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,8 @@ from syft.integrations.github import GitHubQuarantineClient
 from syft.integrations.github_summary import GitHubPRSummaryClient
 from syft.integrations.linear import LinearClient
 from syft.integrations.slack import SlackWebhookClient
+from syft.history.store import HistoryStore
+from syft.history.summary import workflow_history_summary
 from syft.models.analysis import CIContext, WorkflowAnalysis
 from syft.watch import ProcessedRunLedger, WatchError, WorkflowWatcher, watch_forever
 
@@ -111,15 +114,27 @@ def _agent_main(argv: list[str]) -> int:
     )
     parser.add_argument("--use-openai", action="store_true", help="generate explanations with OpenAI")
     parser.add_argument("--state-file", type=Path, default=Path(".syft-agent-state.json"))
+    parser.add_argument("--history-db", type=Path, default=Path(".syft/history.sqlite3"))
+    parser.add_argument("--history-limit", type=int, default=20)
     arguments = parser.parse_args(argv)
+    if arguments.history_limit < 1:
+        parser.error("--history-limit must be >= 1")
 
     openai = None
     github = None
     github_summary = None
     linear = None
     slack = None
+    history_store = None
     try:
         workflow = WorkflowAnalysis.model_validate_json(arguments.input.read_text(encoding="utf-8"))
+        history_store = HistoryStore(arguments.history_db)
+        history_store.record_workflow(workflow)
+        history = workflow_history_summary(
+            history_store,
+            workflow,
+            limit=arguments.history_limit,
+        )
         explainer = TemplateExplainer()
         if arguments.use_openai:
             openai = OpenAIExplainer.from_environment(arguments.repo)
@@ -148,8 +163,9 @@ def _agent_main(argv: list[str]) -> int:
             slack=slack,
             github_summary=github_summary,
             publish_github_summary=True,
+            history=history,
         )
-    except (ExplanationError, IntegrationError, OSError, ValueError) as error:
+    except (ExplanationError, IntegrationError, OSError, sqlite3.Error, ValueError) as error:
         parser.error(str(error))
     finally:
         if openai:
@@ -162,6 +178,8 @@ def _agent_main(argv: list[str]) -> int:
             linear.close()
         if slack:
             slack.close()
+        if history_store:
+            history_store.close()
     print(result.model_dump_json(indent=2))
     return 0
 
@@ -239,7 +257,11 @@ def _watch_main(argv: list[str]) -> int:
     parser.add_argument("--action-state-file", type=Path, default=Path(".syft/agent-state.json"))
     parser.add_argument("--output-dir", type=Path, default=Path(".syft/runs"))
     parser.add_argument("--trace-dir", type=Path, default=Path("traces"))
+    parser.add_argument("--history-db", type=Path, default=Path(".syft/history.sqlite3"))
+    parser.add_argument("--history-limit", type=int, default=20)
     arguments = parser.parse_args(argv)
+    if arguments.history_limit < 1:
+        parser.error("--history-limit must be >= 1")
 
     repo = _validated_repo(parser, arguments.repo)
     github_discovery = None
@@ -248,6 +270,7 @@ def _watch_main(argv: list[str]) -> int:
     github_summary = None
     linear = None
     slack = None
+    history_store = None
     try:
         github_discovery = GitHubActionsClient(
             os.getenv("GITHUB_TOKEN", ""),
@@ -271,6 +294,7 @@ def _watch_main(argv: list[str]) -> int:
                 os.getenv("LINEAR_TEAM_ID", ""),
             )
             slack = SlackWebhookClient(os.getenv("SLACK_WEBHOOK_URL", ""))
+        history_store = HistoryStore(arguments.history_db)
         watcher = WorkflowWatcher(
             repo_path=repo,
             github=github_discovery,
@@ -289,6 +313,8 @@ def _watch_main(argv: list[str]) -> int:
             github_summary=github_summary,
             linear=linear,
             slack=slack,
+            history_store=history_store,
+            history_limit=arguments.history_limit,
         )
         return watch_forever(
             watcher,
@@ -307,6 +333,7 @@ def _watch_main(argv: list[str]) -> int:
         JUnitParseError,
         OSError,
         RerunError,
+        sqlite3.Error,
         ValueError,
         WatchError,
     ) as error:
@@ -324,6 +351,8 @@ def _watch_main(argv: list[str]) -> int:
             linear.close()
         if slack:
             slack.close()
+        if history_store:
+            history_store.close()
 
 
 def _validated_repo(parser: argparse.ArgumentParser, repo: Path) -> Path:

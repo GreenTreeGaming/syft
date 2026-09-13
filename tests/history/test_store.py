@@ -10,6 +10,7 @@ from syft.history.summary import (
     historical_pass_rate,
     recurring_flaky_tests,
     trend_summary,
+    workflow_history_summary,
 )
 from syft.models.analysis import (
     Classification,
@@ -81,6 +82,30 @@ def test_duplicate_workflow_ingestion_does_not_duplicate_records(
         assert flaky[0].commit == "current-sha"
         assert flaky[0].branch == "fixture"
         assert flaky[0].workflow_run_id == 42
+
+
+def test_workflow_history_summary_is_bounded_and_keyed_by_test(
+    workflow_analysis: WorkflowAnalysis,
+    tmp_path: Path,
+) -> None:
+    with HistoryStore(tmp_path / "history.sqlite") as store:
+        store.record_workflow(workflow_analysis)
+        summary = workflow_history_summary(store, workflow_analysis, limit=1)
+
+    assert summary.repository == "owner/repo"
+    assert summary.records == 3
+    assert summary.tests == 3
+    assert summary.workflow_runs == 1
+    flaky = summary.by_test["tests/test_flaky.py::test_flaky"]
+    assert flaky.observations == 1
+    assert flaky.flaky_count == 1
+    assert flaky.flaky_occurrence_rate == 1.0
+    assert flaky.rerun_pass_rate == 2 / 5
+    assert flaky.consecutive_all_failures == 0
+    regression = summary.by_test["tests/test_checkout.py::test_checkout"]
+    assert regression.flaky_count == 0
+    assert regression.rerun_pass_rate == 0.0
+    assert regression.consecutive_all_failures == 1
 
 
 def test_history_is_isolated_per_repository(tmp_path: Path) -> None:
