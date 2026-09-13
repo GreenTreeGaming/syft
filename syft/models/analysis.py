@@ -134,3 +134,36 @@ class TestAnalysis(StrictModel):
             indent=indent,
             exclude={"reruns": {"__all__": {"output"}}},
         )
+
+
+class ClassificationSummary(StrictModel):
+    flaky: int = Field(ge=0)
+    regression: int = Field(ge=0)
+    escalate: int = Field(ge=0)
+    total: int = Field(ge=0)
+
+
+class WorkflowAnalysis(StrictModel):
+    """Aggregate result for every failed test in one workflow run."""
+
+    schema_version: str = "1.0"
+    workflow_analysis_id: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    repository: str
+    branch: str
+    workflow_run_id: int
+    workflow_name: str | None = None
+    current_commit: str
+    last_green_commit: str
+    junit_artifact: str
+    failed_tests: list[str]
+    summary: ClassificationSummary
+    analyses: list[TestAnalysis]
+
+    def consumer_dump_json(self, *, indent: int | None = None) -> str:
+        """Serialize compact analyses while retaining the run-level envelope."""
+
+        return self.model_dump_json(
+            indent=indent,
+            exclude={"analyses": {"__all__": {"reruns": {"__all__": {"output"}}}}},
+        )

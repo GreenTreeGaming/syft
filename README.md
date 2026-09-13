@@ -89,6 +89,24 @@ with GitHubActionsClient.from_environment() as github:
     artifact = github.download_junit_artifact(failed.id, Path("artifacts"))
 ```
 
+## Analyze the latest failed workflow automatically
+
+Export GitHub configuration without placing the token in source control, then run the coordinator:
+
+```bash
+export GITHUB_TOKEN="$(gh auth token)"
+export GITHUB_REPOSITORY="GreenTreeGaming/syft-testing"
+
+python -m syft poll \
+  --repo /Users/sarvajithkarun/Desktop/Projects/syft-testing \
+  --branch codex/regression-fixture \
+  --green-branch main \
+  --artifact-name pytest-junit \
+  --ground-truth /Users/sarvajithkarun/Desktop/Projects/syft-testing/eval/ground_truth.json
+```
+
+The coordinator discovers the newest failed run, finds the prior successful run, downloads its JUnit artifact, analyzes every failed test from a detached checkout, writes full traces, and prints a compact `WorkflowAnalysis` JSON envelope. When `--ground-truth` is provided, the confusion matrix and regression safety metrics are printed to stderr.
+
 ## Run tests
 
 ```bash

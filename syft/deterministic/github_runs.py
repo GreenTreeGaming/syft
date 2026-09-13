@@ -60,6 +60,7 @@ class GitHubActionsClient:
             },
             timeout=30.0,
             transport=transport,
+            follow_redirects=True,
         )
 
     @classmethod
@@ -151,4 +152,3 @@ class GitHubActionsClient:
             return response
         except httpx.HTTPError as error:
             raise GitHubAPIError(f"GitHub API request failed: {error}") from error
-
