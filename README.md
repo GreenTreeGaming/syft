@@ -113,6 +113,52 @@ The coordinator discovers the newest failed run, finds the prior successful run,
 python -m pytest
 ```
 
+## Run the action agent
+
+The agent consumes compact `WorkflowAnalysis` JSON. Dry run is the default and performs no GitHub, Linear, or Slack writes:
+
+```bash
+python -m syft agent --input /tmp/syft-analysis.json
+```
+
+To let OpenAI generate structured explanations while still keeping every external action in dry-run mode:
+
+```bash
+export OPENAI_API_KEY="..."
+export OPENAI_MODEL="gpt-5.4-mini"
+
+python -m syft agent \
+  --input /tmp/syft-analysis.json \
+  --repo /path/to/tested/repository \
+  --use-openai
+```
+
+The model's Structured Output schema intentionally has no `classification` or `confidence` field. It can explain evidence and propose a hypothesis, but the pure router always copies the deterministic classification into its action plan.
+
+Real external actions require the explicit `--execute` flag and all integration credentials:
+
+```bash
+export GITHUB_TOKEN="$(gh auth token)"
+export LINEAR_API_KEY="..."
+export LINEAR_TEAM_ID="..."
+export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+
+python -m syft agent \
+  --input /tmp/syft-analysis.json \
+  --repo /path/to/tested/repository \
+  --use-openai \
+  --execute
+```
+
+Routing is fixed:
+
+- `FLAKY` creates a stacked quarantine PR against the failed branch.
+- `REGRESSION` creates a Linear regression issue and never modifies code.
+- `ESCALATE` creates a Linear needs-triage issue.
+- One Slack digest summarizes the workflow and links to created actions.
+
+`.syft-agent-state.json` records successful action IDs so rerunning the same workflow does not duplicate actions. The GitHub branch and PR lookup provide an additional external idempotency check.
+
 ## Classification rules
 
 - Mixed passes and failures, with no directly related source change: `FLAKY`.

@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictModel(BaseModel):
@@ -34,14 +34,15 @@ class RerunAttempt(StrictModel):
     outcome: RerunOutcome
     duration_seconds: float = Field(ge=0.0)
     exit_code: int
-    output: str
+    output: str = ""
+    passed: bool = False
 
-    @computed_field
-    @property
-    def passed(self) -> bool:
-        """Backward-compatible convenience field for simple consumers."""
+    @model_validator(mode="after")
+    def derive_passed(self) -> "RerunAttempt":
+        """Keep the convenience field consistent with the authoritative outcome."""
 
-        return self.outcome is RerunOutcome.PASSED
+        self.passed = self.outcome is RerunOutcome.PASSED
+        return self
 
 
 class RerunSummary(StrictModel):
